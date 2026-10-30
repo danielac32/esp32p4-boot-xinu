@@ -1,0 +1,132 @@
+#
+# Platform-specific Makefile definitions for the ESP32-P4 port
+# (Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5)
+#
+
+# Include default RISCV32 definitions (the P4 is RV32: rv32imafdc)
+include arch/riscv32/platformVars
+
+PLATFORM_NAME := ESP32-P4
+
+# The P4 is rv32imafdc / ilp32f (same ISA the SDK uses for the HP core).
+CFLAGS   += -march=rv32imafc_zicsr_zifencei -mabi=ilp32f -O2 -ffreestanding
+ASFLAGS  += -march=rv32imafc_zicsr_zifencei -mabi=ilp32f
+
+# Add a define so we can test for the ESP32-P4 in C code if absolutely needed
+DEFS     += -D_XINU_PLATFORM_ESP32P4_
+
+# esp-hosted's SDIO transport guards on TARGET_SOC_ESP32P4
+DEFS     += -DTARGET_SOC_ESP32P4
+
+# LVGL needs its own directory on the include path so that
+# lv_conf_internal.h's __has_include("lv_conf.h") finds lvgl/lv_conf.h
+# (otherwise it falls back to a relative "../../lv_conf.h" that does not
+# resolve from the compile directory).
+# DISABLED: LVGL no forma parte del build minimo.
+#INCLUDE  += -I$(TOPDIR)/lvgl
+
+# The FAT32 library lives in fatfs/ and uses <fat_table.h>-style includes
+# relative to its own directory.
+# DISABLED: FAT no forma parte del build minimo.
+#INCLUDE  += -I$(TOPDIR)/fatfs
+
+# FAT library hook: exposes fl_get_fs() (used by fatfs/fat_rmdir.c).
+#DISABLED: FAT no forma parte del build minimo.
+#DEFS     += -DFATFS_INC_TEST_HOOKS
+
+# lwIP (vendored): public headers + lwipopts.h/arch/cc.h from its port dir.
+#DISABLED: lwip no forma parte del build minimo.
+#INCLUDE  += -I$(TOPDIR)/lwip/include -I$(TOPDIR)/lwip/port/include
+
+# Shims for the ported esp-hosted/lwIP code (delay.h/mtimer.h/usb_serial.h).
+#DISABLED: lwip no forma parte del build minimo.
+#INCLUDE  += -I$(TOPDIR)/drivers/net/compat
+
+# esp-hosted headers (esp_hosted.h/...): wifi.c in drivers/net includes them.
+#DISABLED: esp-hosted no forma parte del build minimo.
+#INCLUDE  += -I$(TOPDIR)/drivers/sdio
+
+# Embedded Xinu components to build into the kernel image.
+# CLEAN MINIMAL BOOT: only the (basic) shell.  No mailbox/lvgl/fatfs/lwip/apps.
+APPCOMPS := shell apps
+
+# Extra static libraries linked into the kernel (built from lib/<name>/).
+
+# Linking data files across ABIs needs this
+LDFLAGS  += --no-warn-mismatch
+
+# Embedded Xinu device drivers to build into the kernel image.
+# CLEAN MINIMAL BOOT: serial driver (tty over UART0) + PSRAM (memory/stack).
+DEVICES  := tty uart-esp32p4 psram
+
+# ============================================================================
+# Imágenes de arranque del P4: SBL (bootloader de 2ª etapa) y ULP (firmware
+# del coprocesador LP). Son binarios independientes del ELF del kernel; los
+# construye machine/Makefile con su propia toolchain, linker scripts y flags.
+# El SBL inicializa el SoC (WDT, clock, PSRAM, MMU), arranca el LP core y salta
+# al kernel en 0x40005000.
+#
+# Al ser prerequisites de $(BOOTIMAGE), un `make' normal construye las tres
+# imágenes; `make sbl' / `make ulp' construyen solo una de ellas.
+# ============================================================================
+MACHINE_DIR := $(TOPDIR)/machine
+SBL_BIN     := $(MACHINE_DIR)/build/sbl.bin
+ULP_BIN     := $(MACHINE_DIR)/build/ulp.bin
+
+# esptool interviene dos veces: elf2image del SBL (en machine/) y el flasheo.
+# No siempre está en el PATH (suele vivir en el venv de ESP-IDF), así que es
+# parametrizable; compile/Makefile exporta todas las variables al sub-make, de
+# modo que el valor llega también a machine/Makefile:
+#
+#   make ESPTOOL=$HOME/esp-idf-py/bin/esptool
+#
+ESPTOOL    ?= esptool
+
+# Fuentes de las que dependen las imágenes (rebuild si cambia cualquiera).  Los
+# wildcards cubren los .c/.S/.h/.ld y la libpsram.a de cada imagen.
+MACHINE_SRCS := $(MACHINE_DIR)/Makefile \
+                $(wildcard $(MACHINE_DIR)/sbl/*) \
+                $(wildcard $(MACHINE_DIR)/ulp/*)
+
+$(SBL_BIN): $(MACHINE_SRCS)
+	@echo -e "\tBuilding SBL"
+	@$(MAKE) -s -C $(MACHINE_DIR) sbl
+
+$(ULP_BIN): $(MACHINE_SRCS)
+	@echo -e "\tBuilding ULP"
+	@$(MAKE) -s -C $(MACHINE_DIR) ulp
+
+.PHONY: sbl ulp machineclean
+sbl: $(SBL_BIN)
+ulp: $(ULP_BIN)
+
+# `make clean' NO borra machine/build a propósito: el SBL y el ULP residen en
+# la flash y rara vez cambian (se suben con `make flash'), y reconstruir el SBL
+# necesita esptool.  `make realclean' sí elimina las tres imágenes.
+machineclean:
+	@$(MAKE) -s -C $(MACHINE_DIR) clean
+
+PLATCLEAN := machineclean
+
+# El kernel usa "$<" (no "$^") en arch/riscv32/platformVars, así que añadir
+# estos prerequisites no interfiere con el objcopy del kernel.
+$(BOOTIMAGE): $(SBL_BIN) $(ULP_BIN)
+
+# Flasheo de las tres imágenes en sus offsets del mapa de memoria del P4:
+# SBL @ 0x2000, kernel @ 0x5000, ULP @ 0x100000 (flash de 16 MB).
+PORT ?= /dev/ttyACM0
+BAUD ?= 460800
+.PHONY: flash
+flash: $(BOOTIMAGE) $(SBL_BIN) $(ULP_BIN)
+	$(ESPTOOL) --chip esp32p4 -p $(PORT) -b $(BAUD) \
+		--before=default-reset --after=hard-reset \
+		write-flash --flash-mode dio --flash-freq 80m --flash-size 16MB \
+		0x2000 $(SBL_BIN) 0x5000 $(BOOTIMAGE) 0x100000 $(ULP_BIN)
+
+.PHONY: flashxinu
+flashxinu: $(BOOTIMAGE)
+	@echo -e "\tFlashing Xinu kernel @ 0x5000"
+	$(ESPTOOL) --chip esp32p4 -p $(PORT) -b $(BAUD) \
+		--before=default-reset --after=hard-reset \
+		write-flash --flash-mode dio --flash-freq 80m --flash-size 16MB \
+		0x5000 $(BOOTIMAGE)

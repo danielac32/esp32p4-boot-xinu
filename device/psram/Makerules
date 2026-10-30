@@ -1,0 +1,13 @@
+# This Makefile contains rules to build files in the device/psram/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/psram
+
+# Source files for this component.  The raw driver (psram_test) lives in
+# drivers/psram/; this component adds the kernel device glue.
+C_FILES = psramInit.c 
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

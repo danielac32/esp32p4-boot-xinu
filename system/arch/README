@@ -1,0 +1,12 @@
+This directory contains CPU-architecture-specific code.
+
+Note that a CPU architecture may be shared among one or more
+Embedded Xinu "platforms" (see ../platforms/ ).
+
+Nothing here is compiled directly: SYSCOMPS only covers system/,
+system/platforms/$(PLATFORM) and loader/, so each reusable file has a
+one-line twin in the platform directory that #includes it (see
+system/platforms/esp32p4/ctxsw.S).  Code that touches this SoC's
+registers has no twin here and lives only in the platform directory:
+riscvclk.c (CLINT mtime/mtimecmp, which on RV32 must be read and written
+as two 32-bit words), clic.c, platforminit.c and irqentry.S.

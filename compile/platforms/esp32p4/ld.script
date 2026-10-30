@@ -1,0 +1,137 @@
+/**
+ * @file ld.script
+ *
+ * Linker script for Embedded Xinu on the ESP32-P4 (Waveshare
+ * ESP32-P4-WIFI6-Touch-LCD-3.5).
+ *
+ * The SBL (boot loader) sets up the MMU, the cache and the PSRAM, then
+ * jumps to __kernel_entry_point (0x40005000) in flash.  From there the
+ * kernel runs XiP and copies its .data into the internal L2MEM.
+ *
+ * Memory regions (from the SDK's Memory_Map.ld):
+ *   FLASH(rx)     0x40005000, 31M   -> code + rodata (XiP)
+ *   PSRAM(rwx)    0x48000000, 31M   -> free heap (exposed, not used at boot)
+ *   HP_L2MEM(rwx) 0x4FF00000, 768K  -> kernel RAM (stack, data, bss, DMA)
+ *   LP_SRAM       0x50108000, 32K   -> low-power SRAM
+ *
+ * The P4 MMU has no permission bits (only "valid" + "flash/PSRAM"): all
+ * three regions are RWX, and PSRAM is executable.
+ */
+/* Embedded Xinu, Copyright (C) 2018.  All rights reserved. */
+
+ENTRY(_start)
+
+MEMORY
+{
+    FLASH(rx)     : ORIGIN = 0x40005000, LENGTH = 31M
+    RAM(rwx)      : ORIGIN = 0x48000000, LENGTH = 31M
+    HP_L2MEM(rwx) : ORIGIN = 0x4FF00000, LENGTH = 768K
+    LP_SRAM(rwx)  : ORIGIN = 0x50108000, LENGTH = 32K
+}
+
+SECTIONS
+{
+    /* ---- flash (XiP) ------------------------------------------------ */
+    .init : ALIGN(4)
+    {
+        KEEP(*(.init))
+        KEEP(*(.init.*))
+    } > FLASH
+
+    .text : ALIGN(4)
+    {
+        _text = .;
+        *(.text)
+        *(.text.*)
+        . = ALIGN(4);
+    } > FLASH
+
+    .rodata : ALIGN(4)
+    {
+        *(.rodata)
+        *(.rodata.*)
+        *(.srodata)
+        *(.srodata.*)
+        . = ALIGN(4);
+    } > FLASH
+
+    .ctors : ALIGN(4)
+    {
+        __CTOR_LIST__ = .;
+        KEEP (*(SORT(.ctors.*)))
+        KEEP (*(.ctors))
+        KEEP (*(SORT(.init_array.*)))
+        KEEP (*(.init_array))
+        LONG(-1);
+        . = ALIGN(4);
+    } > FLASH
+
+    _etext = .;
+
+    /* ---- internal L2MEM --------------------------------------------- */
+
+    /* CLIC hardware vector table (NOLOAD): filled at runtime by the
+     * interrupt controller before any line is unmasked.  aligned(64). */
+    .vectors (NOLOAD) : ALIGN(64)
+    {
+        KEEP(*(.vectors))
+        . = ALIGN(64);
+    } > HP_L2MEM
+
+    /* Initialized data: stored in flash, copied to L2MEM at boot */
+    .data : ALIGN(4)
+    {
+        _sdata = .;
+        _data_start = .;
+        *(.data)
+        *(.data.*)
+        *(.sdata)
+        *(.sdata.*)
+        _edata = .;
+        _data_end = .;
+    } > HP_L2MEM AT>FLASH
+
+    _data_loadaddr = LOADADDR(.data);
+
+    /* Uninitialized data: L2MEM only */
+    .bss : ALIGN(4)
+    {
+        _sbss = .;
+        _bss_start = .;
+        *(.bss)
+        *(.bss.*)
+        *(.sbss)
+        *(.sbss.*)
+        *(COMMON)
+        _ebss = .;
+        _bss_end = .;
+    } > HP_L2MEM
+
+    /* Stack del core1 (NOLOAD): la usa sólo el bucle de aparcado de
+     * loader/platforms/esp32p4/start.S.  Sección aparte, detrás de .bss y
+     * antes de _end, por dos motivos: el borrado de .bss que hace core0 no la
+     * toca (el core1 escribe su testigo ahí), y el heap de L2MEM arranca por
+     * encima, así que nunca se solapa con él. */
+    .core1stk (NOLOAD) : ALIGN(16)
+    {
+        _core1stk = .;
+        . = . + 2048;
+        _core1stk_end = .;
+    } > HP_L2MEM
+
+    _end = .;
+
+    /* Free L2MEM: Xinu heap (thread stacks, buffers).  Starts right after
+     * the reserved regions above; ends at the top of the region. */
+    _l2mem_free_start = _end;
+    _l2mem_free_end   = ORIGIN(HP_L2MEM) + LENGTH(HP_L2MEM);
+
+    /* PSRAM: left entirely free for the PSRAM allocator. */
+    _psram_free_start = ORIGIN(RAM);
+    _psram_free_end   = ORIGIN(RAM) + LENGTH(RAM);
+
+    /DISCARD/ : {
+        *(.comment .comment.* .note .note.*)
+        *(.eh_frame)
+    }
+}

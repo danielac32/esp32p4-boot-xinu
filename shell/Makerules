@@ -1,0 +1,27 @@
+# This Makefile contains rules to build files in the shell/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = shell
+
+# Source files for this component
+C_FILES = shell.c lexan.c getopt.c
+
+# General shell commands
+C_FILES += xsh_clear.c xsh_date.c xsh_echo.c xsh_exit.c xsh_help.c \
+           xsh_reset.c xsh_sleep.c xsh_uptime.c
+
+# Processes commands
+C_FILES += xsh_kill.c xsh_ps.c xsh_sem.c xsh_mon.c xsh_stack.c xsh_ktest.c
+
+# Memory commands
+C_FILES += xsh_memdump.c xsh_mem.c
+
+# UART commands
+C_FILES += xsh_uartstat.c
+
+
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}
