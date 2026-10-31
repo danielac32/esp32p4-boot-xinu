@@ -32,7 +32,7 @@ static int mkdir_p(const char *path)
             *p = '\0';
             if (tmp[1] != '\0' && !fl_is_dir(tmp))
             {
-                if (fl_createdirectory(tmp) != 0 && !fl_is_dir(tmp))
+                if (fl_createdirectory(tmp) != 1 && !fl_is_dir(tmp))
                 {
                     *p = saved;
                     return SYSERR;
@@ -134,7 +134,7 @@ shellcmd xsh_mkdir(int nargs, char *args[])
             continue;
         }
 
-        if (fl_createdirectory(path) != 0)
+        if (fl_createdirectory(path) != 1)
         {
             fprintf(stderr, "%s: %s: could not create\n", args[0], path);
             rc = SYSERR;

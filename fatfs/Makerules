@@ -1,0 +1,28 @@
+# This Makefile builds the FAT File IO Library (fatfs/) as a Xinu component:
+# the vendored library (fat_access, fat_cache, fat_filelib, fat_format,
+# fat_misc, fat_string, fat_table, fat_write) plus the two files that make it
+# a Xinu file system (disk.c: sector glue over SD0; fat_rmdir.c: directory
+# removal, which the shell's rm needs).
+#
+# The library keeps its own headers in this directory and includes them by
+# name (<fat_table.h>, ...); platformVars puts -I$(TOPDIR)/fatfs on the
+# include path.
+
+# Name of this component (the directory this file is stored in)
+COMP = fatfs
+
+# All .c in the directory (library + glue).  Sorted for a deterministic link.
+C_FILES = $(shell cd $(TOPDIR)/fatfs && ls *.c | sort)
+
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}
+
+# The vendored library has static helpers in fat_list.h and old-style ()
+# prototypes; Xinu's full warning set is not meaningful for third-party code,
+# so those two warnings are relaxed for this component only.
+$(DIR)/%.o: $(DIR)/%.c
+	@echo -e "\tCompiling" $@
+	$(CC) $(DEPFLAGS) $(CFLAGS) -Wno-unused-function -Wno-strict-prototypes -g -o $@ $<

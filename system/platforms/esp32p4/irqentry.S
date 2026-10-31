@@ -77,6 +77,11 @@ p4_irq_entry:
 	la	t1, interruptVector
 	add	t1, t1, t0
 	lw	t1, 0(t1)
+	bnez	t1, 1f
+	/* TEMPORARY (bring-up): a line with no handler would jump to 0. */
+	csrr	a0, mcause
+	call	irq_missing
+1:
 	jalr	t1
 
 	/* Restore the CSRs ctxsw() may have overwritten while we were away. */

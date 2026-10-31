@@ -1,0 +1,23 @@
+# This Makefile contains rules to build files in the
+# device/sdmmc-esp32p4/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/sdmmc-esp32p4
+
+# Source files for this component.  This is the host layer: the pads, the
+# SDMMC clock tree, the command engine, the IDMAC data path and the Xinu
+# device glue of SDMMC0.  The card protocol lives one layer up, in
+# device/sdblock-esp32p4.
+C_FILES = sdHw.c         \
+	  sdmmcClose.c   \
+	  sdmmcControl.c \
+	  sdmmcInit.c    \
+	  sdmmcOpen.c    \
+	  sdmmcRead.c    \
+	  sdmmcSeek.c    \
+	  sdmmcWrite.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

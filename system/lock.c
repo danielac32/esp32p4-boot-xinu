@@ -10,15 +10,17 @@
  *
  * Lock a monitor.
  *
- * If no thread owns the monitor, its owner is set to the current thread and its
- * count is set to 1.
- *
  * If the current thread already owns the monitor, its count is incremented and
- * no further action is taken.
+ * no further action is taken.  Otherwise the thread waits until the owning
+ * thread has fully unlocked the monitor, then becomes its owner with a count
+ * of 1.
  *
- * If another thread owns the monitor, the current thread waits for the monitor
- * to become fully unlocked by that thread, then sets its owner to the current
- * thread and its count to 1.
+ * The semaphore is what hands the monitor over, so it is taken before
+ * ownership is claimed.  Claiming first and waiting afterwards deadlocks:
+ * signal() can already have promised the wake-up to a blocked waiter, so a
+ * thread that finds the monitor unowned blocks inside its own claim, and the
+ * monitor ends up owned by whichever thread collects the promised wake-up --
+ * possibly a thread that then exits, leaving the monitor locked forever.
  *
  * @param mon
  *      The monitor to lock.
@@ -41,30 +43,25 @@ syscall lock(monitor mon)
 
     monptr = &montab[mon];
 
-    /* if no thread owns the lock, the current thread claims it */
-    if (NOOWNER == monptr->owner)
+    /* the owner re-entering the monitor only deepens the count */
+    if (thrcurrent == monptr->owner)
     {
-        monptr->owner = thrcurrent;     /* current thread now owns the lock  */
-        (monptr->count)++;      /* add 1 "lock" to the monitor's count */
-        wait(monptr->sem);      /* this thread owns the semaphore      */
-    }
-    else
-    {
-        /* if current thread owns the lock increase count; dont wait on sem */
-        if (thrcurrent == monptr->owner)
-        {
-            (monptr->count)++;
-        }
-        /* if another thread owns the lock, wait on sem until monitor is free */
-        else
-        {
-            wait(monptr->sem);
-            monptr->owner = thrcurrent;
-            (monptr->count)++;
-
-        }
+        (monptr->count)++;
+        restore(im);
+        return OK;
     }
 
+    restore(im);
+
+    /* Interrupts stay enabled for the wait: this is where the thread may be
+     * taken off the CPU, and resched() only acts when they are. */
+    wait(monptr->sem);
+
+    /* the previous owner has fully unlocked; this thread owns the monitor */
+    im = disable();
+    monptr = &montab[mon];
+    monptr->owner = thrcurrent;
+    monptr->count = 1;
     restore(im);
     return OK;
 }

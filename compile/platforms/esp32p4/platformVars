@@ -25,14 +25,12 @@ DEFS     += -DTARGET_SOC_ESP32P4
 # DISABLED: LVGL no forma parte del build minimo.
 #INCLUDE  += -I$(TOPDIR)/lvgl
 
-# The FAT32 library lives in fatfs/ and uses <fat_table.h>-style includes
-# relative to its own directory.
-# DISABLED: FAT no forma parte del build minimo.
-#INCLUDE  += -I$(TOPDIR)/fatfs
+# The FAT file system library lives in fatfs/ and uses <fat_table.h>-style
+# includes relative to its own directory.
+INCLUDE  += -I$(TOPDIR)/fatfs
 
 # FAT library hook: exposes fl_get_fs() (used by fatfs/fat_rmdir.c).
-#DISABLED: FAT no forma parte del build minimo.
-#DEFS     += -DFATFS_INC_TEST_HOOKS
+DEFS     += -DFATFS_INC_TEST_HOOKS
 
 # lwIP (vendored): public headers + lwipopts.h/arch/cc.h from its port dir.
 #DISABLED: lwip no forma parte del build minimo.
@@ -47,8 +45,8 @@ DEFS     += -DTARGET_SOC_ESP32P4
 #INCLUDE  += -I$(TOPDIR)/drivers/sdio
 
 # Embedded Xinu components to build into the kernel image.
-# CLEAN MINIMAL BOOT: only the (basic) shell.  No mailbox/lvgl/fatfs/lwip/apps.
-APPCOMPS := shell apps
+# CLEAN MINIMAL BOOT: the shell and the FAT library (fatfs/) it drives.
+APPCOMPS := shell apps fatfs
 
 # Extra static libraries linked into the kernel (built from lib/<name>/).
 
@@ -56,8 +54,13 @@ APPCOMPS := shell apps
 LDFLAGS  += --no-warn-mismatch
 
 # Embedded Xinu device drivers to build into the kernel image.
-# CLEAN MINIMAL BOOT: serial driver (tty over UART0) + PSRAM (memory/stack).
-DEVICES  := tty uart-esp32p4 psram
+# CLEAN MINIMAL BOOT: serial driver (tty over UART0) + PSRAM (memory/stack)
+# + nam (syntactic namespace: mounts /dev/<name> and lists them at boot)
+# + lcd-esp32p4 (ST7796 320x480 panel over the SPI2 master)
+# + sdmmc-esp32p4 (SDMMC host: pads, clock tree, command engine, IDMAC)
+# + sdblock-esp32p4 (the microSD card: SD protocol over the SDMMC host)
+# + fat (the FAT volume on that card; the library lives in fatfs/).
+DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat
 
 # ============================================================================
 # Imágenes de arranque del P4: SBL (bootloader de 2ª etapa) y ULP (firmware

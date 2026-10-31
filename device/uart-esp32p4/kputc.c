@@ -1,11 +1,13 @@
 /**
  * @file kputc.c
  *
- * Synchronous character output to the ESP32-P4 UART0.
+ * Synchronous character output to the ESP32-P4 UART0, mirrored onto the LCD
+ * text console so the kernel's log is readable on the board's screen.
  */
 /* Embedded Xinu, Copyright (C) 2026.  All rights reserved. */
 
 #include <uart.h>
+#include <lcd.h>
 #include "p4uart.h"
 
 syscall kputc(uchar c, device *devptr)
@@ -20,5 +22,6 @@ syscall kputc(uchar c, device *devptr)
 
     regptr->fifo = (uint32_t)c;
     uartptr->cout++;
+    //lcdConsolePutc(c);
     return c;
 }

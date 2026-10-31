@@ -213,7 +213,7 @@ int fs_copy_tree(const char *src, const char *dst)
 
     if (!fl_is_dir(dst))
     {
-        if (fl_createdirectory(dst) != 0 && !fl_is_dir(dst))
+        if (fl_createdirectory(dst) != 1 && !fl_is_dir(dst))
         {
             return SYSERR;
         }

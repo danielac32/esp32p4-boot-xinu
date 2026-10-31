@@ -59,6 +59,12 @@ void trap_handler(trap_frame_t *frame)
     /* Any other exception is a kernel bug: report and stop. */
     kprintf("**** unhandled trap: mcause=0x%lx mepc=0x%lx mtval=0x%lx\n",
             (ulong)cause, (ulong)frame->mepc, (ulong)read_csr(mtval));
+    /* TEMPORARY (bring-up): who was running and who called. */
+    kprintf("**** ra=0x%lx a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx "
+            "a4=0x%lx a5=0x%lx mstatus=0x%lx frame=0x%lx\n",
+            (ulong)frame->ra, (ulong)frame->a0, (ulong)frame->a1,
+            (ulong)frame->a2, (ulong)frame->a3, (ulong)frame->a4,
+            (ulong)frame->a5, (ulong)frame->mstatus, (ulong)(uintptr_t)frame);
     halt();
 }
 

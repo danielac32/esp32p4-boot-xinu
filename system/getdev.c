@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <device.h>
+#include <nam.h>
 #include <string.h>
 
 /**
@@ -22,6 +23,9 @@
 syscall getdev(const char *dev)
 {
     int devnum;
+#ifdef NAMESPACE
+    char newname[NM_MAXLEN];
+#endif
 
     for (devnum = 0; devnum < NDEVS; devnum++)
     {
@@ -30,6 +34,16 @@ syscall getdev(const char *dev)
             return devnum;
         }
     }
+
+#ifdef NAMESPACE
+    /* Fall back to the syntactic namespace, so paths like "/dev/lcd0" work
+     * for callers that use getdev() instead of open(NAMESPACE, ...). */
+    devnum = nammap(dev, newname, NAMESPACE);
+    if (SYSERR != devnum)
+    {
+        return devnum;
+    }
+#endif
 
     return SYSERR;
 }

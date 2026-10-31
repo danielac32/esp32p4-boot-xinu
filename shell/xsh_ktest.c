@@ -1,9 +1,10 @@
 /**
  * @file xsh_ktest.c
  *
- * Pruebas de humo del kernel: mutex no recursivo, mqueue de tamaño variable.
+ * Pruebas de humo del kernel: mutex no recursivo, mqueue de tamaño variable
+ * y escritura/lectura real sobre el sistema de ficheros.
  *
- *   ktest [all|mutex|mq]
+ *   ktest [all|mutex|mq|fat]
  */
 /* Embedded Xinu, Copyright (C) 2026.  All rights reserved. */
 
@@ -11,12 +12,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <kernel.h>
 #include <thread.h>
 #include <interrupt.h>
 #include <shell.h>
 #include <mutex.h>
 #include <mqueue.h>
 #include <memory.h>
+#include <fsutil.h>
 
 static volatile int mtx_counter;
 static volatile int ktest_done;
@@ -230,6 +233,317 @@ static int test_mqueue(void)
     return rc;
 }
 
+/* Tamaño de clúster del volumen: 32 KiB.  Escribir 33 KiB obliga a la
+ * librería a asignar un segundo clúster y a escribir la FAT, que es lo que
+ * los comandos de shell (touch/mkdir/mv/rm, metadatos vacíos) no ejercitan.
+ * Los búferes son de un sector: el stack del comando no da para más. */
+#define FATTEST_CHUNK   512
+#define FATTEST_TOTAL   33792U
+#define FATTEST_PATH    "/ktest.fat"
+
+static uint8 fattest_pattern(unsigned i)
+{
+    return (uint8)((i * 31U + 7U) ^ (i >> 8));
+}
+
+/**
+ * Write >1 cluster, read it back and compare, then append a sector and
+ * check the grew size.  Leaves the volume as it found it (file removed).
+ */
+static int test_fat_io(void)
+{
+    unsigned char buf[FATTEST_CHUNK];
+    void *f;
+    unsigned off, i;
+    unsigned long bad = 0, first_bad = 0;
+    long size;
+    int rc = OK;
+
+    if (!fs_mounted())
+    {
+        printf("fat: no hay volumen montado\n");
+        return SYSERR;
+    }
+
+    /* --- escribir FATTEST_TOTAL bytes ------------------------------- */
+    fl_remove(FATTEST_PATH);
+    f = fl_fopen(FATTEST_PATH, "w");
+    if (f == NULL)
+    {
+        printf("fat: fopen(\"%s\", \"w\") falló\n", FATTEST_PATH);
+        return SYSERR;
+    }
+
+    for (off = 0; off < FATTEST_TOTAL; off += FATTEST_CHUNK)
+    {
+        for (i = 0; i < FATTEST_CHUNK; i++)
+        {
+            buf[i] = fattest_pattern(off + i);
+        }
+        if (fl_fwrite(buf, 1, FATTEST_CHUNK, f) != FATTEST_CHUNK)
+        {
+            printf("fat: fwrite falló en el offset %u\n", off);
+            rc = SYSERR;
+            break;
+        }
+    }
+
+    fl_fflush(f);
+    fl_fclose(f);
+
+    /* --- tamaño tal como lo ve el directorio -------------------------- */
+    f = fl_fopen(FATTEST_PATH, "r");
+    if (f == NULL)
+    {
+        printf("fat: el fichero no sobrevivió al cierre\n");
+        return SYSERR;
+    }
+
+    fl_fseek(f, 0, SEEK_END);
+    size = fl_ftell(f);
+    if (size != (long)FATTEST_TOTAL)
+    {
+        printf("fat: tamaño=%ld (esperado %u)\n", size, FATTEST_TOTAL);
+        rc = SYSERR;
+    }
+
+    /* --- leer de vuelta y comparar ----------------------------------- */
+    fl_fseek(f, 0, SEEK_SET);
+    for (off = 0; rc == OK && off < FATTEST_TOTAL; off += FATTEST_CHUNK)
+    {
+        if (fl_fread(buf, 1, FATTEST_CHUNK, f) != FATTEST_CHUNK)
+        {
+            printf("fat: fread se cortó en el offset %u\n", off);
+            rc = SYSERR;
+            break;
+        }
+        for (i = 0; i < FATTEST_CHUNK; i++)
+        {
+            if (buf[i] != fattest_pattern(off + i))
+            {
+                if (bad == 0)
+                {
+                    first_bad = off + i;
+                }
+                bad++;
+            }
+        }
+    }
+    fl_fclose(f);
+
+    if (bad != 0)
+    {
+        printf("fat: %lu byte(s) mal, primero en %lu\n", bad, first_bad);
+        rc = SYSERR;
+    }
+
+    /* --- append: la librería debe extender el mismo clúster/cadena ---- */
+    if (rc == OK)
+    {
+        f = fl_fopen(FATTEST_PATH, "a");
+        if (f == NULL)
+        {
+            printf("fat: fopen(\"a\") falló\n");
+            return SYSERR;
+        }
+        for (i = 0; i < FATTEST_CHUNK; i++)
+        {
+            buf[i] = fattest_pattern(FATTEST_TOTAL + i);
+        }
+        if (fl_fwrite(buf, 1, FATTEST_CHUNK, f) != FATTEST_CHUNK)
+        {
+            printf("fat: fwrite en append falló\n");
+            rc = SYSERR;
+        }
+        fl_fflush(f);
+        fl_fclose(f);
+
+        f = fl_fopen(FATTEST_PATH, "r");
+        fl_fseek(f, 0, SEEK_END);
+        size = fl_ftell(f);
+        fl_fclose(f);
+
+        if (size != (long)(FATTEST_TOTAL + FATTEST_CHUNK))
+        {
+            printf("fat: tamaño tras append=%ld (esperado %u)\n", size,
+                   FATTEST_TOTAL + FATTEST_CHUNK);
+            rc = SYSERR;
+        }
+        else
+        {
+            printf("fat: %u B + %u B append verificados byte a byte\n",
+                   FATTEST_TOTAL, FATTEST_CHUNK);
+        }
+    }
+
+    if (fl_remove(FATTEST_PATH) != 0)
+    {
+        printf("fat: no se pudo borrar %s\n", FATTEST_PATH);
+        rc = SYSERR;
+    }
+
+    printf("fat: %s\n", (rc == OK) ? "OK" : "FAIL");
+    return rc;
+}
+
+/* El filesystem lo van a usar a la vez el shell y alguna tarea (el arranque,
+ * más adelante).  Cada tarea escribe su propio fichero, lo lee y lo compara:
+ * si los tres candados (librería FAT -> tarjeta -> bus SDMMC) no serializan
+ * bien, las cadenas de clústeres se pisan y la comparación falla o el
+ * fopen de lectura no encuentra nada. */
+#define FATMT_THREADS   4
+#define FATMT_CHUNK     512
+#define FATMT_TOTAL     4096U
+
+static volatile int fatmt_done;
+static volatile int fatmt_fail;
+
+static uint8 fattest_mt_pattern(int seed, unsigned i)
+{
+    return (uint8)((i * 31U + (unsigned)seed * 131U) ^ (i >> 8));
+}
+
+static thread fatmt_worker(int seed)
+{
+    unsigned char buf[FATMT_CHUNK];
+    char path[24];
+    void *f;
+    unsigned off, i;
+    int bad = 0;
+
+    sprintf(path, "/mt%d.fat", seed);
+
+    /* Deja el nombre libre si una ejecución anterior se quedó a medias:
+     * la librería no trunca con "w" sobre un nombre que ya existe. */
+    fl_remove(path);
+
+    f = fl_fopen(path, "w");
+    if (f == NULL)
+    {
+        bad++;
+    }
+    else
+    {
+        for (off = 0; off < FATMT_TOTAL; off += FATMT_CHUNK)
+        {
+            for (i = 0; i < FATMT_CHUNK; i++)
+            {
+                buf[i] = fattest_mt_pattern(seed, off + i);
+            }
+            if (fl_fwrite(buf, 1, FATMT_CHUNK, f) != FATMT_CHUNK)
+            {
+                bad++;
+                break;
+            }
+        }
+        fl_fflush(f);
+        fl_fclose(f);
+    }
+
+    f = fl_fopen(path, "r");
+    if (f == NULL)
+    {
+        bad++;
+    }
+    else
+    {
+        fl_fseek(f, 0, SEEK_END);
+        if (fl_ftell(f) != (long)FATMT_TOTAL)
+        {
+            bad++;
+        }
+        fl_fseek(f, 0, SEEK_SET);
+        for (off = 0; off < FATMT_TOTAL; off += FATMT_CHUNK)
+        {
+            if (fl_fread(buf, 1, FATMT_CHUNK, f) != FATMT_CHUNK)
+            {
+                bad++;
+                break;
+            }
+            for (i = 0; i < FATMT_CHUNK; i++)
+            {
+                if (buf[i] != fattest_mt_pattern(seed, off + i))
+                {
+                    bad++;
+                }
+            }
+        }
+        fl_fclose(f);
+    }
+
+    if (fl_remove(path) != 0)
+    {
+        bad++;
+    }
+
+    {
+        irqmask im = disable();
+        if (bad != 0)
+        {
+            fatmt_fail++;
+        }
+        fatmt_done++;
+        restore(im);
+    }
+    return 0;
+}
+
+static int test_fat_mt(void)
+{
+    tid_typ tid[FATMT_THREADS];
+    int i;
+    int waited = 0;
+
+    if (!fs_mounted())
+    {
+        printf("fatmt: no hay volumen montado\n");
+        return SYSERR;
+    }
+
+    fatmt_done = 0;
+    fatmt_fail = 0;
+
+    for (i = 0; i < FATMT_THREADS; i++)
+    {
+        tid[i] = create((void *)fatmt_worker, SHELL_CMDSTK, SHELL_CMDPRIO,
+                        "ktestfat", 1, i);
+        if (SYSERR == tid[i])
+        {
+            printf("fatmt: no se pudo crear la tarea %d\n", i);
+            return SYSERR;
+        }
+    }
+
+    for (i = 0; i < FATMT_THREADS; i++)
+    {
+        ready(tid[i], RESCHED_NO);
+    }
+
+    while (fatmt_done < FATMT_THREADS && waited < 30000)
+    {
+        sleep(10);
+        waited += 10;
+    }
+
+    for (i = 0; i < FATMT_THREADS; i++)
+    {
+        recvclr();
+    }
+
+    if (fatmt_done < FATMT_THREADS)
+    {
+        printf("fatmt: %d de %d tareas terminaron\n", fatmt_done,
+               FATMT_THREADS);
+        printf("fatmt: FAIL\n");
+        return SYSERR;
+    }
+
+    printf("fatmt: %d tareas, %u B cada una (%d con errores)\n",
+           FATMT_THREADS, FATMT_TOTAL, fatmt_fail);
+    printf("fatmt: %s\n", (fatmt_fail == 0) ? "OK" : "FAIL");
+    return (fatmt_fail == 0) ? OK : SYSERR;
+}
+
 /**
  * @ingroup shell
  *
@@ -241,7 +555,7 @@ shellcmd xsh_ktest(int nargs, char *args[])
 
     if (nargs >= 2 && strcmp(args[1], "--help") == 0)
     {
-        printf("Usage: %s [all|mutex|mq]\n", args[0]);
+        printf("Usage: %s [all|mutex|mq|fat|fatmt]\n", args[0]);
         return 0;
     }
 
@@ -249,6 +563,8 @@ shellcmd xsh_ktest(int nargs, char *args[])
     {
         if (SYSERR == test_mutex()) rc = 1;
         if (SYSERR == test_mqueue()) rc = 1;
+        if (SYSERR == test_fat_io()) rc = 1;
+        if (SYSERR == test_fat_mt()) rc = 1;
         return rc;
     }
 
@@ -260,6 +576,16 @@ shellcmd xsh_ktest(int nargs, char *args[])
     if (strcmp(args[1], "mq") == 0)
     {
         return (SYSERR == test_mqueue()) ? 1 : 0;
+    }
+
+    if (strcmp(args[1], "fat") == 0)
+    {
+        return (SYSERR == test_fat_io()) ? 1 : 0;
+    }
+
+    if (strcmp(args[1], "fatmt") == 0)
+    {
+        return (SYSERR == test_fat_mt()) ? 1 : 0;
     }
 
     fprintf(stderr, "%s: opción desconocida '%s'\n", args[0], args[1]);

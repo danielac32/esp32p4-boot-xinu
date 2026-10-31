@@ -1,0 +1,18 @@
+# This Makefile contains rules to build files in the
+# device/lcd-esp32p4/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/lcd-esp32p4
+
+# Source files for this component.  Everything is self-contained: the SPI2
+# master, the pads, the ST7796 panel sequence and the Xinu device glue all live here.
+C_FILES = lcdInit.c \
+	  lcdControl.c \
+	  lcdGpio.c \
+	  lcdSpi.c \
+	  st7796.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

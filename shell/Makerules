@@ -4,7 +4,7 @@
 COMP = shell
 
 # Source files for this component
-C_FILES = shell.c lexan.c getopt.c
+C_FILES = shell.c lexan.c getopt.c fsutil.c
 
 # General shell commands
 C_FILES += xsh_clear.c xsh_date.c xsh_echo.c xsh_exit.c xsh_help.c \
@@ -18,6 +18,17 @@ C_FILES += xsh_memdump.c xsh_mem.c
 
 # UART commands
 C_FILES += xsh_uartstat.c
+
+# Display commands
+C_FILES += xsh_lcd.c
+
+# Storage commands
+C_FILES += xsh_sd.c
+
+# Filesystem commands (FAT volume on the microSD)
+C_FILES += xsh_pwd.c xsh_cd.c xsh_ls.c xsh_cat.c xsh_head.c xsh_tail.c \
+           xsh_cp.c xsh_mv.c xsh_rm.c xsh_mkdir.c xsh_rmdir.c xsh_stat.c \
+           xsh_df.c xsh_format.c xsh_hexdump.c xsh_touch.c xsh_test.c
 
 
 S_FILES =

@@ -18,6 +18,8 @@ static void print_os_info(void);
 /**
  * Main thread.  It opens the console and starts the shell.
  */
+
+extern int bootTask(int dev);
 thread main(void)
 {
     /* Print information about the operating system  */
@@ -36,7 +38,8 @@ thread main(void)
     {
         kprintf("WARNING: Failed to create SHELL\r\n");
     }
- 
+    
+    ready(create(bootTask, INITSTK, INITPRIO, "bootlcd", 0), RESCHED_NO);
     return 0;
 }
 

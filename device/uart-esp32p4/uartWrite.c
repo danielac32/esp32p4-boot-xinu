@@ -11,7 +11,7 @@
 
 #include <uart.h>
 #include <interrupt.h>
-
+ 
 devcall uartWrite(device *devptr, const void *buf, uint len)
 {
     struct uart *uartptr;
@@ -25,7 +25,9 @@ devcall uartWrite(device *devptr, const void *buf, uint len)
 
     for (count = 0; count < len; count++)
     {
-        uartHwPutc(uartptr->csr, ((const uchar *)buf)[count]);
+        uchar c = ((const uchar *)buf)[count];
+
+        uartHwPutc(uartptr->csr, c);
         uartptr->cout++;
     }
 

@@ -15,6 +15,7 @@
 #include <thread.h>
 #include <conf.h>
 #include <uart.h>
+#include <fat.h>
 
 const struct centry commandtab[] = {
     {"clear", TRUE, xsh_clear},
@@ -35,8 +36,28 @@ const struct centry commandtab[] = {
     {"mem", FALSE, xsh_mem},
     {"memdump", FALSE, xsh_memdump},
     {"uartstat", FALSE, xsh_uartstat},
+    {"lcd", FALSE, xsh_lcd},
+    {"sd", FALSE, xsh_sd},
+    {"pwd", FALSE, xsh_pwd},
+    {"cd", FALSE, xsh_cd},
+    {"ls", FALSE, xsh_ls},
+    {"cat", FALSE, xsh_cat},
+    {"head", FALSE, xsh_head},
+    {"tail", FALSE, xsh_tail},
+    {"cp", FALSE, xsh_cp},
+    {"mv", FALSE, xsh_mv},
+    {"rm", FALSE, xsh_rm},
+    {"mkdir", FALSE, xsh_mkdir},
+    {"rmdir", FALSE, xsh_rmdir},
+    {"stat", FALSE, xsh_stat},
+    {"df", FALSE, xsh_df},
+    {"format", FALSE, xsh_format},
+    {"hexdump", FALSE, xsh_hexdump},
+    {"touch", FALSE, xsh_touch},
+    {"test", FALSE, xsh_test},
 };
 ulong ncommand = sizeof(commandtab) / sizeof(struct centry);
+
 
 extern ulong foreground;
 
@@ -60,16 +81,15 @@ thread shell(int indescrp, int outdescrp, int errdescrp)
     syscall child;              /* pid of child thread      */
     ushort i, j;                /* temp variables           */
     irqmask im;                 /* interrupt mask state     */
-
+ 
     /* Set command devices for input, output, and error */
     stdin = indescrp;
     stdout = outdescrp;
     stderr = errdescrp;
  
-        printf(SHELL_BANNER);
-        printf(SHELL_START);
+    printf(SHELL_BANNER);
+    printf(SHELL_START);
  
-
     /* Continually receive and handle commands */
     while (TRUE)
     {

@@ -56,6 +56,22 @@ static void p4_irq_default(void)
 {
 }
 
+/* TEMPORARY (bring-up): report the line that had no handler and stop. */
+void irq_missing(uint32_t cause);
+void irq_missing(uint32_t cause)
+{
+    volatile uint32_t *vt = (volatile uint32_t *)interruptVector;
+
+    kprintf("**** irq with null vector: mcause=0x%lx irq=%lu\r\n",
+            (ulong)cause, (ulong)(cause & 0xffUL));
+    kprintf("**** vt0..7 %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx\r\n",
+            (ulong)vt[0], (ulong)vt[1], (ulong)vt[2], (ulong)vt[3],
+            (ulong)vt[4], (ulong)vt[5], (ulong)vt[6], (ulong)vt[7]);
+    for (;;)
+    {
+    }
+}
+
 /* Common assembly entry (irqentry.S).  It saves the caller-saved integer
  * and FP registers plus mepc/mstatus, dispatches to
  * interruptVector[mcause & 0xff], and returns with mret.  mepc/mstatus are

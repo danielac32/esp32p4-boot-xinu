@@ -11,7 +11,7 @@
 #include <kernel.h>
 #include <fsutil.h>
 #include <fat_table.h>
-#include <drivers/sd/sd.h>
+#include <sdblock.h>
 
 /* Print @p kib in a human-friendly unit (GiB/MiB/KiB). */
 static void df_human(unsigned long kib)
@@ -43,6 +43,7 @@ shellcmd xsh_df(int nargs, char *args[])
 {
     struct fatfs *fs;
     uint32 free_clusters;
+    uint32 total_clusters;
     ulong spc;
     ulong total_kib;
     ulong free_sectors;
@@ -86,14 +87,26 @@ shellcmd xsh_df(int nargs, char *args[])
     }
 
     spc = (ulong)fs->sectors_per_cluster;
-    free_clusters = fatfs_count_free_clusters(fs);
-    free_sectors = (ulong)free_clusters * spc;
 
-    total_kib = (ulong)sd_capacity_blocks() / 2UL;      /* 2 * 512 B = 1 KiB   */
-    free_kib = free_sectors / 2UL;
+    /* Total is the volume's data area, not the whole card: the boot sector,
+     * the reserved sectors and both FAT copies live before the first
+     * cluster, which starts at fs->cluster_begin_lba. */
+    total_clusters = (sd_capacity_blocks() > fs->cluster_begin_lba)
+        ? (uint32)((sd_capacity_blocks() - fs->cluster_begin_lba) / spc)
+        : 0;
 
     printf("Volume : FAT32 on microSD (SDMMC slot 0)\n");
     printf("Cluster: %lu byte(s)\n", spc * 512UL);
+
+    /* One sector read per FAT sector (FAT_BUFFER_SECTORS is 1): on this
+     * 58 GiB card that is ~15k reads, so the scan is not instant. */
+    printf("Scanning: the FAT, one sector at a time ...\n");
+    free_clusters = fatfs_count_free_clusters(fs, total_clusters + 2);
+
+    free_sectors = (ulong)free_clusters * spc;
+
+    total_kib = (ulong)total_clusters * spc / 2UL;       /* 2 * 512 B = 1 KiB */
+    free_kib = free_sectors / 2UL;
 
     if (human)
     {

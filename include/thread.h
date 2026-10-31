@@ -39,7 +39,7 @@
 #define INITSTK     65536       /**< initial thread stack size          */
 #endif
 #define INITPRIO    20          /**< initial thread priority            */
-#define MINSTK      4 * 1024         /**< minimum thread stack size          */
+#define MINSTK      16 * 1024         /**< minimum thread stack size          */
 #ifdef JTAG_DEBUG
 #define INITRET   debugret      /**< threads return address for debug   */
 #else                           /* not JTAG_DEBUG */

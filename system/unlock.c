@@ -16,17 +16,19 @@
  * set to unowned and up to one thread that may be waiting to lock() the monitor
  * is awakened.
  *
- * This normally should be called by the owning thread of the monitor
- * subsequently to a lock() by the same thread, but this also may be called
- * moncount(mon) times to fully unlock a monitor that was owned by a thread that
- * has been killed.
+ * Only the owning thread may unlock: with lock() handing the monitor over
+ * through its semaphore, an unlock from another thread would free a monitor
+ * that a running thread still holds.  A monitor left owned by a thread that
+ * died is a bug in that thread's caller, and is fixed by unlocking it from
+ * a thread that owns it, not from anybody else.
  *
  * @param mon
  *      The monitor to unlock.
  *
  * @return
  *      ::OK on success; ::SYSERR on failure (@p mon did not specify a valid,
- *      allocated monitor with nonzero lock count).
+ *      allocated monitor, the monitor was not locked, or the current thread
+ *      does not own it).
  */
 syscall unlock(monitor mon)
 {
@@ -42,8 +44,8 @@ syscall unlock(monitor mon)
 
     monptr = &montab[mon];
 
-    /* safety check: monitor must be locked at least once  */
-    if (monptr->count == 0)
+    /* safety check: the owner has to be the one holding it locked */
+    if (0 == monptr->count || thrcurrent != monptr->owner)
     {
         restore(im);
         return SYSERR;

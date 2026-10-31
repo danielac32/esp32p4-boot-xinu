@@ -25,10 +25,21 @@
 #define PSRAM_BASE          0x48000000
 #define PSRAM_SIZE          0x02000000  /* 32 MB */
 
+/* PSRAM answers at two addresses (TRM 7.3.3.1): 0x48...... goes through the
+ * L1/L2 caches, 0x88...... (+this offset) is the CPU's direct path to the
+ * same cells.  The probe below uses the direct path on purpose: walking
+ * 32 MB through the cached path evicts the cache lines that hold the
+ * kernel's own L2MEM .data, and this chip loses the first 128 bytes of
+ * L2MEM (one cache line) on that eviction -- at boot that silently zeroed
+ * fs_cwd[] and every shell pwd/cd that followed.  The direct path also
+ * makes the test check the PSRAM cells themselves rather than the cache. */
+#define PSRAM_CPU_UNCACHED  0x40000000UL
+
 
 bool psram_test(void)
 {
-    volatile uint32_t *mem = (volatile uint32_t *)PSRAM_BASE;
+    volatile uint32_t *mem =
+        (volatile uint32_t *)(PSRAM_BASE + PSRAM_CPU_UNCACHED);
     static const uint32_t offsets[] = {
         0,
         0x1000,

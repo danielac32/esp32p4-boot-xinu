@@ -1,0 +1,22 @@
+# This Makefile contains rules to build files in the
+# device/sdblock-esp32p4/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/sdblock-esp32p4
+
+# Source files for this component.  This is the card layer: the SD protocol
+# (identification, sector cursor, CID/CSD) on top of the SDMMC0 host device,
+# plus the Xinu device glue of SD0.  There is no hardware register here.
+C_FILES = sdblkClose.c   \
+	  sdblkControl.c \
+	  sdblkInit.c    \
+	  sdblkOpen.c    \
+	  sdblkRead.c    \
+	  sdblkSeek.c    \
+	  sdblkWrite.c   \
+	  sdCard.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

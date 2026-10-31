@@ -10,8 +10,8 @@
  *
  * Memory regions (from the SDK's Memory_Map.ld):
  *   FLASH(rx)     0x40005000, 31M   -> code + rodata (XiP)
- *   PSRAM(rwx)    0x48000000, 31M   -> free heap (exposed, not used at boot)
- *   HP_L2MEM(rwx) 0x4FF00000, 768K  -> kernel RAM (stack, data, bss, DMA)
+ *   PSRAM(rwx)    0x48000000, 31M   -> shared engine pages, then free heap
+ *   HP_L2MEM(rwx) 0x4FF00000, 768K  -> kernel RAM (stack, data, bss)
  *   LP_SRAM       0x50108000, 32K   -> low-power SRAM
  *
  * The P4 MMU has no permission bits (only "valid" + "flash/PSRAM"): all
@@ -68,7 +68,36 @@ SECTIONS
 
     _etext = .;
 
+    /* ---- accelerator pages (PSRAM, direct-accessed) ------------------ */
+    /* Two pages the SD block engine shares with the CPU: the first holds its
+     * DMA descriptor, the second the block in transit.  They live in PSRAM
+     * because the chip has a documented CPU path to external RAM that skips
+     * the cache (0x88..., see sdHw.c), so CPU and engine meet on the same
+     * cells with no cache operation in between.  NOLOAD: no image bytes and
+     * the boot does not clear them; the driver writes both before use. */
+    .sdshare (NOLOAD) : ALIGN(4096)
+    {
+        _sd_desc_page = .;
+        . = . + 4096;
+        _sd_block_page = .;
+        . = . + 4096;
+    } > RAM
+
     /* ---- internal L2MEM --------------------------------------------- */
+
+    /* First page of L2MEM left unused.  The CPU reads this SRAM through the
+     * same L2 cache that caches the PSRAM, and the cache line holding
+     * 0x4FF00000 is lost when external-memory traffic thrashes that cache:
+     * the boot PSRAM probe (or any big PSRAM sweep) zeroes the first 128
+     * bytes of L2MEM.  With .data starting here that silently cleared
+     * fs_cwd[] and the shell's pwd/cd.  Keeping kernel data out of the
+     * page costs 4 KB and makes the two independent (see psramInit.c,
+     * which also probes PSRAM through the uncached 0x88... alias). */
+    .l2reserve (NOLOAD) : ALIGN(4096)
+    {
+        _l2reserve = .;
+        . = . + 4096;
+    } > HP_L2MEM
 
     /* CLIC hardware vector table (NOLOAD): filled at runtime by the
      * interrupt controller before any line is unmasked.  aligned(64). */
@@ -122,12 +151,17 @@ SECTIONS
     _end = .;
 
     /* Free L2MEM: Xinu heap (thread stacks, buffers).  Starts right after
-     * the reserved regions above; ends at the top of the region. */
+     * the reserved regions above.  It stops well below the top of the
+     * region: the last 64 KB belong to the boot ROM, which keeps its cache
+     * dispatch table at 0x4FFBFFD8 and its boot stack at 0x4FFBCFC0
+     * (SOC_ROM_STACK_START_REV2).  Xinu hands out thread stacks from the
+     * top of the heap, so without this the first stack lands on the ROM's
+     * data and every ROM call that goes through the table dies. */
     _l2mem_free_start = _end;
-    _l2mem_free_end   = ORIGIN(HP_L2MEM) + LENGTH(HP_L2MEM);
+    _l2mem_free_end   = ORIGIN(HP_L2MEM) + LENGTH(HP_L2MEM) - 64K;
 
-    /* PSRAM: left entirely free for the PSRAM allocator. */
-    _psram_free_start = ORIGIN(RAM);
+    /* PSRAM: free from the end of the shared pages up. */
+    _psram_free_start = _sd_block_page + 4096;
     _psram_free_end   = ORIGIN(RAM) + LENGTH(RAM);
 
     /DISCARD/ : {

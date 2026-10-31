@@ -49,8 +49,10 @@
 #define SD_D3               42
 #define SD_CMD              44
 #define SD_CLK              43
-#define SD_PWR              45  /* Q1 AO3401 gate: HIGH = slot powered */
 #define SD_CD               SD_D3   /* card-detect tied to D3 */
+/* The slot has no power-switch GPIO: its VDD rail is the on-chip LDO
+ * output VO4 (PMU LDO channel 4), enabled by the SD driver.  (GPIO45 is
+ * USB_DM, not an SD power gate; the Waveshare BSPs drive no such pin.) */
 
 /* ======================================================================
  * I2S (audio, ES8311 + amp + mic)

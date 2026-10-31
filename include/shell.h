@@ -112,6 +112,7 @@ shellcmd xsh_rmdir(int, char *[]);
 shellcmd xsh_touch(int, char *[]);
 shellcmd xsh_stat(int, char *[]);
 shellcmd xsh_df(int, char *[]);
+shellcmd xsh_format(int, char *[]);
 shellcmd xsh_hexdump(int, char *[]);
 shellcmd xsh_echo(int, char *[]);
 
@@ -135,7 +136,7 @@ shellcmd xsh_ping(int, char *[]);
 shellcmd xsh_wget(int, char *[]);
 shellcmd xsh_curl(int, char *[]);
 shellcmd xsh_telnetd(int, char *[]);
-
+shellcmd xsh_test(int, char *[]);
 /* Configuration commands (JSON documents in /config on the FAT volume) */
 
 #endif                          /* _SHELL_H_ */

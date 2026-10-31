@@ -13,8 +13,8 @@
 
 #include <riscv.h>
 
-#define PANICSTK  8192
-#define NULLSTK   8192
+#define PANICSTK  16384
+#define NULLSTK   16384
 
 .section .init
 	.globl _start
@@ -121,9 +121,10 @@ reset_handler:
 	addi t0, t0, 4
 	j 3b
 4:
-	/* CLIC hardware vector table (mtvt, CSR 0x307). */
+	/* CLIC hardware vector table (mtvt, CSR 0x307).  Written numerically:
+	 * this assembler does not know the mtvt name. */
 	la t0, InterruptVectorTable
-	csrw mtvt, t0
+	csrw 0x307, t0
 
 	/* Exception base, CLIC mode (mtvec.MODE = 3). */
 	la t0, ExceptionVectorTable

@@ -16,10 +16,10 @@
 
 #include <stddef.h>
 #include <kernel.h>
-//#include <fat_filelib.h>
+#include <fat_filelib.h>
 
 /** Maximum length of a path handled by the shell tools, incl. NUL. */
-//#define FS_PATH_MAX 128
+#define FS_PATH_MAX 128
 
 /** Current working directory of the shell (always absolute, starts '/'). */
 extern char fs_cwd[FS_PATH_MAX];
