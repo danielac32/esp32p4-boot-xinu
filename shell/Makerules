@@ -27,6 +27,9 @@ C_FILES += xsh_lcd.c
 # PMIC battery gauge, audio codec)
 C_FILES += xsh_i2c.c xsh_gpio.c xsh_touchpanel.c xsh_power.c xsh_audio.c
 
+# Boot-time dashboard task (main.c spawns it after bootTask)
+C_FILES += xsh_dash.c
+
 # Storage commands
 C_FILES += xsh_sd.c
 

@@ -20,6 +20,7 @@ static void print_os_info(void);
  */
 
 extern int bootTask(int dev);
+extern int dashTask(void);
 thread main(void)
 {
     /* Print information about the operating system  */
@@ -39,7 +40,20 @@ thread main(void)
         kprintf("WARNING: Failed to create SHELL\r\n");
     }
     
-    ready(create(bootTask, INITSTK, INITPRIO, "bootlcd", 0), RESCHED_NO);
+    /* La tarea de arranque pinta el booteo y, al volver de su funcion,
+     * userret()->kill()->send(parent) avisa a esta hebra.  dashTask espera ese
+     * aviso para no pisar el banner mientras bootTask aun dibuja.  */
+    int child = create(bootTask, INITSTK, INITPRIO, "bootlcd", 0);
+    irqmask im;
+    while (recvclr() != NOMSG);
+    im = disable();
+    ready(child, RESCHED_YES);
+    restore(im);
+
+    /* Wait for boot thread to finish, then hand the panel to the dashboard. */
+    while (receive() != child);
+    sleep(1000);
+    ready(create(dashTask, INITSTK, INITPRIO, "dash", 0), RESCHED_YES);
     return 0;
 }
 
