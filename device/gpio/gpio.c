@@ -203,7 +203,11 @@ void gpio_toggle(uint8_t pin)
 
 #define GPIO_MAT_IN_SEL_MASK     0x3FUL
 #define GPIO_MAT_IN_INV_SEL      (1UL << 6)
-#define GPIO_MAT_IN_CONST_SEL    (1UL << 7)
+/* FUNC_IN_SEL_CFG[s] bit 7 (SIG_IN_SEL) picks the source of signal s:
+ * 0 = the pad wired directly in the IOMUX, 1 = the GPIO matrix.  It must be
+ * 1 for every route set up here, including the two constants; without it the
+ * peripheral samples the IOMUX path and never sees the pin. */
+#define GPIO_MAT_IN_SIG_IN_SEL   (1UL << 7)
 
 #define GPIO_MAT_CONST_ZERO      0x3EU
 #define GPIO_MAT_CONST_ONE       0x3FU
@@ -229,15 +233,15 @@ void gpio_matrix_in(uint8_t pin, uint32_t sig, bool inv)
 
     if (pin == GPIO_MAT_CONST_ZERO)
     {
-        v = GPIO_MAT_IN_CONST_SEL;              /* constant 0 */
+        v = GPIO_MAT_IN_SIG_IN_SEL;             /* constant 0 */
     }
     else if (pin == GPIO_MAT_CONST_ONE)
     {
-        v = GPIO_MAT_IN_CONST_SEL | 1UL;        /* constant 1 */
+        v = GPIO_MAT_IN_SIG_IN_SEL | 1UL;       /* constant 1 */
     }
     else
     {
-        v = (pin & GPIO_MAT_IN_SEL_MASK);
+        v = GPIO_MAT_IN_SIG_IN_SEL | (pin & GPIO_MAT_IN_SEL_MASK);
         if (inv) { v |= GPIO_MAT_IN_INV_SEL; }
     }
     *r = v;

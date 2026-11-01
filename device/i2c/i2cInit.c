@@ -27,11 +27,13 @@ devcall i2cInit(device *devptr)
 {
     (void)devptr;
 
-    /*i2cmon = moncreate();
+    /* The monitor must exist before any on-bus device can take it: I2C0 is
+     * declared ahead of TOUCH0 in xinu.conf, so this init runs first. */
+    i2cmon = moncreate();
     if (SYSERR == i2cmon)
     {
         return SYSERR;
-    }*/
+    }
 
     i2c_init();
 
@@ -42,9 +44,10 @@ devcall i2cInit(device *devptr)
 /**
  * @ingroup i2c
  *
- * Lock the shared I2C0 bus monitor.  On-bus devices that drive the raw
- * driver directly (the touch controller, and later the ES8311 codec)
- * bracket their transactions with this hook.
+ * Lock the shared I2C0 bus monitor.  Single transactions do not need this:
+ * i2cControl() takes the monitor itself.  Use it only to keep the bus across
+ * several transactions that must not interleave (the monitor is recursive per
+ * thread, so control(I2C0, ...) still works inside the held region).
  */
 void i2cBusLock(void)
 {

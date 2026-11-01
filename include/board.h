@@ -40,6 +40,12 @@
 #define ES8311_ADDR1        0x19    /* CE high */
 #define AXP2101_ADDR        0x34    /* PMIC    */
 
+/* Touch FPC lines (esquema Waveshare).  TP_RST is active low and the module
+ * brings no pull-up, so the pad stays low after reset and the FT6336 never
+ * answers on 0x38 until the kernel drives it high. */
+#define TP_RST              29
+#define TP_INT              50
+
 /* ======================================================================
  * SD card (SDMMC SLOT0, IOMUX pins — fixed function)
  * ====================================================================== */

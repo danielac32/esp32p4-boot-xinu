@@ -38,10 +38,12 @@ struct i2c_req
 devcall i2cInit(device *);
 devcall i2cControl(device *, int, long, long);
 
-/* Serialize raw access to the shared I2C0 bus.  On-bus devices that talk to
- * the raw driver directly (the touch controller, and later the ES8311 codec)
- * bracket their transactions with these so they share the single bus monitor
- * owned by device/i2c. */
+/* Serialize raw access to the shared I2C0 bus.  Single transactions do not
+ * need these: control(I2C0, ...) takes the bus monitor itself, and that is
+ * the path on-bus devices (touch, ES8311) use.  Keep these hooks only for a
+ * sequence of transactions that must not interleave with another user's; the
+ * monitor is recursive per thread, so control() still works inside a held
+ * region. */
 void i2cBusLock(void);
 void i2cBusUnlock(void);
 

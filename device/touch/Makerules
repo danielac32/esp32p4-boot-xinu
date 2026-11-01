@@ -1,0 +1,15 @@
+# This Makefile contains rules to build files in the
+# device/touch/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/touch
+
+# Source files for this component.  The raw FT6336 driver (reset pulse,
+# polling of the FT5x06 report block) lives in this same directory; the
+# kernel device glue (init + read + control) wraps it.
+C_FILES = touchInit.c touchRead.c touchControl.c touch.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

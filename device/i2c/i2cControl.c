@@ -33,12 +33,15 @@ devcall i2cControl(device *devptr, int func, long arg1, long arg2)
 
     (void)devptr;
 
-    /*if (SYSERR == i2cmon)
+    /* This is the single place where the bus monitor is taken: every on-bus
+     * device reaches the controller through here, so none can forget to
+     * release it. */
+    if (SYSERR == i2cmon)
     {
         return SYSERR;
-    }*/
+    }
 
-    //lock(i2cmon);
+    lock(i2cmon);
     switch (func)
     {
     case I2C_CTRL_PROBE:
@@ -74,7 +77,7 @@ devcall i2cControl(device *devptr, int func, long arg1, long arg2)
         ok = FALSE;
         break;
     }
-    //unlock(i2cmon);
+    unlock(i2cmon);
 
     return ok ? OK : SYSERR;
 }

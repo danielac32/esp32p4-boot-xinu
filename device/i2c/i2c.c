@@ -49,6 +49,7 @@
 
 /* CTR field masks */
 #define I2C_CTR_FORCE_OUTS      0x07U       /* SDA/SCL_FORCE_OUT + SAMPLE_SCL_LEVEL */
+#define I2C_CTR_RX_FULL_ACK     (1U << 3)   /* 1 = NACK al llenarse el RX FIFO */
 #define I2C_CTR_MS_MODE         (1U << 4)
 #define I2C_CTR_TRANS_START     (1U << 5)
 #define I2C_CTR_TX_LSB_FIRST    (1U << 6)
@@ -63,9 +64,11 @@
 #define I2C_FIFO_RX_RST         (1U << 12)
 #define I2C_FIFO_TX_RST         (1U << 13)
 #define I2C_INT_NACK            (1U << 10)
+#define I2C_INT_TRANS_COMPLETE  (1U << 7)
 #define I2C_INT_TIME_OUT        (1U << 8)
 #define I2C_INT_ARB_LOST        (1U << 5)
 #define I2C_INT_END_DETECT      (1U << 3)
+#define I2C_COMD_DONE           (1U << 31)  /* bit done de COMDn (R/W/SS) */
 #define I2C_SR_RXFIFO_CNT_MASK  0x3F00U
 #define I2C_SR_RXFIFO_CNT_SH    8U
 #define I2C_DATA_RDATA_MASK     0xFFU
@@ -144,6 +147,7 @@ static void i2c_set_bus_timing(uint32_t bus_hz)
     uint32_t scl_high      = half_cycle - scl_wait_high;
     uint32_t sda_hold      = half_cycle / 4U;
     uint32_t sda_sample    = half_cycle / 2U;
+    uint32_t tout          = 34U - __builtin_clz(5U * half_cycle);
 
     i2c_wrf(CLKRST_PERI_CLK_CTRL10, CLKRST_I2C0_DIV_NUM,
             CLKRST_I2C0_DIV_NUM_SH, clkm_div - 1U);
@@ -163,6 +167,20 @@ static void i2c_set_bus_timing(uint32_t bus_hz)
     i2c_wrf(I2C_SCL_STOP_SETUP, 0x1FFU, 0, half_cycle - 1U);
     i2c_wrf(I2C_SCL_START_HOLD, 0x1FFU, 0, half_cycle - 1U);
     i2c_wrf(I2C_SCL_STOP_HOLD, 0x1FFU, 0, half_cycle - 1U);
+
+    /* Timeout de línea clavada a 0 (time_out_value = 2^tout ciclos de bus).
+     * El 0x1F que poníamos antes equivale a "nunca", así que un bus muerto
+     * sólo se notaba por el reloj de pared, sin diferenciarlo de un NACK. */
+    i2c_wrf(I2C_TO, I2C_TO_VALUE_MASK, 0, tout);
+    I2C0_REG(I2C_TO) |= I2C_TO_EN;
+}
+
+/* Suelta los FIFOs y los deja desactivados (pulso, como el HAL: los bits
+ * quedan armados si sólo se escriben a 1 y el FIFO se queda en reset). */
+static void i2c_fifo_reset(void)
+{
+    I2C0_REG(I2C_FIFO_CONF) |= (I2C_FIFO_RX_RST | I2C_FIFO_TX_RST);
+    I2C0_REG(I2C_FIFO_CONF) &= ~(I2C_FIFO_RX_RST | I2C_FIFO_TX_RST);
 }
 
 void i2c_init(void)
@@ -179,29 +197,38 @@ void i2c_init(void)
     gpio_set_open_drain(I2C_SDA, true); /* pads open-drain (I2C) */
     gpio_set_open_drain(I2C_SCL, true);
     gpio_matrix_out(I2C_SCL, I2C0_SCL_SIG, false, false);
-    gpio_matrix_in(I2C_SCL, I2C0_SCL_SIG, false);
     gpio_matrix_out(I2C_SDA, I2C0_SDA_SIG, false, false);
+    /* Entradas por la matriz: gpio_matrix_in() programa sig_in_sel, sin ese
+     * bit el controlador muestrea el IOMUX y nunca ve el pad (todo NACK). */
+    gpio_matrix_in(I2C_SCL, I2C0_SCL_SIG, false);
     gpio_matrix_in(I2C_SDA, I2C0_SDA_SIG, false);
 
     ctr = I2C0_REG(I2C_CTR);
-    ctr &= ~(I2C_CTR_FORCE_OUTS | I2C_CTR_TX_LSB_FIRST |
+    ctr &= ~(I2C_CTR_FORCE_OUTS | I2C_CTR_RX_FULL_ACK | I2C_CTR_TX_LSB_FIRST |
              I2C_CTR_RX_LSB_FIRST | I2C_CTR_ARBITRATION_EN);
-    ctr |= I2C_CTR_MS_MODE;             /* master, no force-out (open-drain) */
+    ctr |= I2C_CTR_MS_MODE;             /* master, open-drain (no force-out) */
     I2C0_REG(I2C_CTR) = ctr;
 
     i2c_set_bus_timing(I2C_BUS_HZ);
-    i2c_wrf(I2C_TO, I2C_TO_VALUE_MASK, 0, 0x1FU);
-    I2C0_REG(I2C_TO) |= I2C_TO_EN;
-    I2C0_REG(I2C_FIFO_CONF) |= (I2C_FIFO_RX_RST | I2C_FIFO_TX_RST);
+    i2c_fifo_reset();
     I2C0_REG(I2C_CTR) |= I2C_CTR_CONF_UPGATE;
 }
 
 /* Lanza cmds[0..n) y espera END_DETECT (o NACK/TIME_OUT/ARBITRATION_LOST). */
+static int i2c_err = I2C_ERR_NONE;
+
+int i2c_last_error(void)
+{
+    return i2c_err;
+}
+
 static bool i2c_run(const uint32_t *cmds, unsigned n)
 {
     uint32_t t0 = millis();
+    volatile uint32_t *last = i2c_comd(n - 1);
     unsigned i;
 
+    i2c_err = I2C_ERR_NONE;
     I2C0_REG(I2C_INT_CLR) = 0xFFFFFFFFUL;
     I2C0_REG(I2C_CTR) |= I2C_CTR_FSM_RST;
     for (i = 0; i < n; i++)
@@ -215,18 +242,43 @@ static bool i2c_run(const uint32_t *cmds, unsigned n)
     {
         uint32_t raw = I2C0_REG(I2C_INT_RAW);
 
-        if (raw & (I2C_INT_NACK | I2C_INT_TIME_OUT | I2C_INT_ARB_LOST))
+        if (raw & I2C_INT_NACK)
         {
-            I2C0_REG(I2C_INT_CLR) = 0xFFFFFFFFUL;
-            return false;
+            i2c_err = I2C_ERR_NACK;
         }
-        if (raw & I2C_INT_END_DETECT)
+        else if (raw & I2C_INT_TIME_OUT)
         {
+            i2c_err = I2C_ERR_BUS_TIMEOUT;
+        }
+        else if (raw & I2C_INT_ARB_LOST)
+        {
+            i2c_err = I2C_ERR_ARBITRATION;
+        }
+        else if ((raw & (I2C_INT_END_DETECT | I2C_INT_TRANS_COMPLETE)) ||
+                 (*last & I2C_COMD_DONE))
+        {
+            /* Fin de transacción. end_detect solo no se ve cuando el esclavo
+             * responde ACK: el HAL espera TRANS_COMPLETE (bit 7) o el bit
+             * done del último COMD, y con esto el probe caducaba a los 50 ms
+             * justo en las direcciones de los dispositivos pobladados. */
             I2C0_REG(I2C_INT_CLR) = 0xFFFFFFFFUL;
             return true;
         }
+        else
+        {
+            continue;
+        }
+        /* Transacción muerta: sin esto los bytes que ya estaban en el TX FIFO
+         * saldrían en la transacción siguiente y el escaneo se encadenaría. */
+        I2C0_REG(I2C_INT_CLR) = 0xFFFFFFFFUL;
+        I2C0_REG(I2C_CTR) |= I2C_CTR_FSM_RST;
+        i2c_fifo_reset();
+        return false;
     }
+    i2c_err = I2C_ERR_STUCK;
     I2C0_REG(I2C_INT_CLR) = 0xFFFFFFFFUL;
+    I2C0_REG(I2C_CTR) |= I2C_CTR_FSM_RST;
+    i2c_fifo_reset();
     return false;
 }
 
@@ -254,13 +306,17 @@ static bool i2c_rx_drain(uint8_t *data, size_t len)
 
 bool i2c_probe(uint8_t dev)
 {
-    uint32_t cmds[3];
+    uint32_t cmds[4];
 
+    i2c_fifo_reset();
     cmds[0] = i2c_cmdval(I2C_OP_RSTART, 0, false, false);
     i2c_tx_byte((uint8_t)((dev << 1) | 0U));
     cmds[1] = i2c_cmdval(I2C_OP_WRITE, 1, true, false);
-    cmds[2] = i2c_cmdval(I2C_OP_END, 0, false, false);
-    return i2c_run(cmds, 3);
+    /* STOP: sin él la línea queda retenida tras cada sondeo y el siguiente
+     * address nunca se emite (el FSM arranca con el bus ocupado). */
+    cmds[2] = i2c_cmdval(I2C_OP_STOP, 0, false, false);
+    cmds[3] = i2c_cmdval(I2C_OP_END, 0, false, false);
+    return i2c_run(cmds, 4);
 }
 
 bool i2c_write(uint8_t dev, const uint8_t *data, size_t len)
@@ -272,6 +328,7 @@ bool i2c_write(uint8_t dev, const uint8_t *data, size_t len)
     {
         return false;
     }
+    i2c_fifo_reset();
     cmds[0] = i2c_cmdval(I2C_OP_RSTART, 0, false, false);
     i2c_tx_byte((uint8_t)((dev << 1) | 0U));
     for (i = 0; i < len; i++)
@@ -294,6 +351,7 @@ bool i2c_read(uint8_t dev, uint8_t *data, size_t len)
     {
         return false;
     }
+    i2c_fifo_reset();
     cmds[n++] = i2c_cmdval(I2C_OP_RSTART, 0, false, false);
     i2c_tx_byte((uint8_t)((dev << 1) | 1U));
     cmds[n++] = i2c_cmdval(I2C_OP_WRITE, 1, true, false);
@@ -335,6 +393,7 @@ bool i2c_read_regs(uint8_t dev, uint8_t reg, uint8_t *buf, size_t len)
     {
         return false;
     }
+    i2c_fifo_reset();
     cmds[n++] = i2c_cmdval(I2C_OP_RSTART, 0, false, false);
     i2c_tx_byte((uint8_t)((dev << 1) | 0U));
     i2c_tx_byte(reg);
@@ -375,6 +434,7 @@ bool i2c_read_regs16(uint8_t dev, uint16_t reg, uint8_t *buf, size_t len)
     {
         return false;
     }
+    i2c_fifo_reset();
     cmds[n++] = i2c_cmdval(I2C_OP_RSTART, 0, false, false);
     i2c_tx_byte((uint8_t)((dev << 1) | 0U));
     i2c_tx_byte((uint8_t)(reg >> 8));

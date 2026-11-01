@@ -33,4 +33,14 @@ bool i2c_read_regs(uint8_t dev, uint8_t reg, uint8_t *buf, size_t len);
 bool i2c_write_reg16(uint8_t dev, uint16_t reg, uint8_t val);
 bool i2c_read_regs16(uint8_t dev, uint16_t reg, uint8_t *buf, size_t len);
 
+/* Motivo del último fallo de transacción (lo reescribe cada i2c_run()).
+ * I2C_ERR_STUCK = el FSM no reportó nada en 50 ms: línea retenida a 0 o
+ * reloj del controlador parado; los demás son los intentos normales del bus. */
+#define I2C_ERR_NONE          0
+#define I2C_ERR_NACK          1   /* el esclavo no respondió a la dirección */
+#define I2C_ERR_BUS_TIMEOUT   2   /* SCL/SDA retenidas > 2^tout ciclos       */
+#define I2C_ERR_ARBITRATION   3   /* perdió la arbitraje (otro maestro)      */
+#define I2C_ERR_STUCK         4   /* sin FIN de transacción al pasar el reloj */
+int i2c_last_error(void);
+
 #endif /* I2C_H */

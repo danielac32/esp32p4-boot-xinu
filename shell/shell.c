@@ -39,6 +39,8 @@ const struct centry commandtab[] = {
     {"lcd", FALSE, xsh_lcd},
     {"i2c", FALSE, xsh_i2c},
     {"gpio", FALSE, xsh_gpio},
+    {"touchpanel", FALSE, xsh_touchpanel},
+    {"power", FALSE, xsh_power},
     {"sd", FALSE, xsh_sd},
     {"pwd", FALSE, xsh_pwd},
     {"cd", FALSE, xsh_cd},

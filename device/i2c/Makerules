@@ -6,8 +6,10 @@ COMP = device/i2c
 
 # Source files for this component.  The raw I2C0 master bus driver lives
 # in this same directory; the kernel device glue (init + bus monitor +
-# control + device-level read) wraps it behind control().
-C_FILES = i2cInit.c i2cControl.c i2cRead.c i2c.c
+# control) wraps it.  control() is the only entry point: i2cRead.c is left
+# out of the build because a device-level read would be a second, unlocked
+# path to the same controller.
+C_FILES = i2cInit.c i2cControl.c i2c.c
 S_FILES =
 
 # Add the files to the compile source path

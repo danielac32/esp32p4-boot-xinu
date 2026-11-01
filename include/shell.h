@@ -126,6 +126,7 @@ shellcmd xsh_gpio(int, char *[]);
 shellcmd xsh_i2c(int, char *[]);
 shellcmd xsh_spi(int, char *[]);
 shellcmd xsh_touchpanel(int, char *[]);
+shellcmd xsh_power(int, char *[]);
 shellcmd xsh_sd(int, char *[]);
 
 /* Network commands */

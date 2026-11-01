@@ -59,8 +59,10 @@ LDFLAGS  += --no-warn-mismatch
 # + lcd-esp32p4 (ST7796 320x480 panel over the SPI2 master)
 # + sdmmc-esp32p4 (SDMMC host: pads, clock tree, command engine, IDMAC)
 # + sdblock-esp32p4 (the microSD card: SD protocol over the SDMMC host)
-# + fat (the FAT volume on that card; the library lives in fatfs/).
-DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat gpio i2c
+# + fat (the FAT volume on that card; the library lives in fatfs/)
+# + touch (FT6336 capacitive panel hanging off the shared I2C0 bus)
+# + power (AXP2101 PMIC on that same bus; battery gauge, read-only).
+DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat gpio i2c touch power
 
 # ============================================================================
 # Imágenes de arranque del P4: SBL (bootloader de 2ª etapa) y ULP (firmware

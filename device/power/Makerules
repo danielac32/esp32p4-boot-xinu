@@ -1,0 +1,15 @@
+# This Makefile contains rules to build files in the
+# device/power/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/power
+
+# Source files for this component.  The raw AXP2101 reader (solo lecturas de
+# estado) lives in this same directory; the kernel device glue is init +
+# control.  No read(): el PMIC no es un flujo de bytes.
+C_FILES = powerInit.c powerControl.c power.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

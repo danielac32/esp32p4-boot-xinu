@@ -53,7 +53,8 @@ shellcmd xsh_i2c(int nargs, char *args[])
     if (0 == strcmp(args[1], "scan") && nargs == 2)
     {
         unsigned long a;
-        int found = 0;
+        int found = 0, nack = 0, buserr = 0, last = I2C_ERR_NONE;
+
         printf("scanning I2C0 (0x03..0x77)...\n");
         for (a = 0x03; a <= 0x77; a++)
         {
@@ -61,9 +62,29 @@ shellcmd xsh_i2c(int nargs, char *args[])
             {
                 printf("  found 0x%02lx\n", a);
                 found++;
+                continue;
+            }
+            last = i2c_last_error();
+            if (I2C_ERR_NACK == last)
+            {
+                nack++;
+            }
+            else
+            {
+                if (0 == buserr)
+                {
+                    printf("  0x%02lx: error de bus (codigo %d)\n", a, last);
+                }
+                buserr++;
             }
         }
-        printf("%d device(s) found\n", found);
+        printf("%d device(s) found", found);
+        if (0 == found && 0 != buserr)
+        {
+            printf("  [sin ACK: %d, error de bus: %d, ultimo codigo: %d]",
+                   nack, buserr, last);
+        }
+        printf("\n");
         return OK;
     }
 

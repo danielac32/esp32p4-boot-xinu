@@ -23,8 +23,9 @@ C_FILES += xsh_uartstat.c
 # Display commands
 C_FILES += xsh_lcd.c
 
-# Bus / low-level control commands (I2C master bus, GPIO pins)
-C_FILES += xsh_i2c.c xsh_gpio.c
+# Bus / low-level control commands (I2C master bus, GPIO pins, touch panel,
+# PMIC battery gauge)
+C_FILES += xsh_i2c.c xsh_gpio.c xsh_touchpanel.c xsh_power.c
 
 # Storage commands
 C_FILES += xsh_sd.c
