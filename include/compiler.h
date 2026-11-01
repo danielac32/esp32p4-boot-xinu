@@ -30,4 +30,8 @@
  * boundary.  */
 #define __aligned(n)                __attribute__((aligned(n)))
 
+#define __always_inline inline __attribute__((always_inline))
+#define __weak          __attribute__((weak))
+#define __packed        __attribute__((packed))
+
 #endif /* _COMPILER_H_ */

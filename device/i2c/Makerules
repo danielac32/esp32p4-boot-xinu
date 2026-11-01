@@ -1,0 +1,15 @@
+# This Makefile contains rules to build files in the
+# device/i2c/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/i2c
+
+# Source files for this component.  The raw I2C0 master bus driver lives
+# in this same directory; the kernel device glue (init + bus monitor +
+# control + device-level read) wraps it behind control().
+C_FILES = i2cInit.c i2cControl.c i2cRead.c i2c.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

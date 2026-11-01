@@ -1,77 +1,59 @@
-/**
- * @file setupStack.c
- */
-/* Embedded Xinu, Copyright (C) 2018.  All rights reserved. */
-
 #include <platform.h>
 #include <riscv.h>
+#include <stdint.h>
 
 #define CONTEXT_WORDS 23
-
-/* First 8 arguments pass via a0-a7; the rest spill onto the stack.  */
 #define MAX_REG_ARGS 8
 
-/** Set up the context record and arguments on the stack for a new thread */
 void *setupStack(void *stackaddr, void *procaddr,
                  void *retaddr, uint nargs, va_list ap)
 {
-    uint spilled_nargs;
-    ulong *saddr = stackaddr;
+    uint spilled_nargs =
+        (nargs > MAX_REG_ARGS) ? nargs - MAX_REG_ARGS : 0;
 
-    /* Determine if any arguments will spill onto the stack (outside the context
-     * record).  If so, reserve space for them.  */
-    if (nargs > MAX_REG_ARGS) {
-        spilled_nargs = nargs - MAX_REG_ARGS;
-        saddr -= spilled_nargs;
-    } else {
-        spilled_nargs = 0;
-    }
-
-    /* Construct the context record for the new thread.  */
-    saddr -= CONTEXT_WORDS;
-
-    /* Possibly skip a word to ensure the stack is aligned on 16-byte boundary
-     * after the new thread pops off the context record.  */
-    while ((ulong)saddr & 0xf)
-    {
-	saddr = (void*)((ulong)saddr) - 1;
-    }
-    uint i = 0;
-    /* Arguments passed in registers (part of context record)  */
-    /* program counter */
-    saddr[i++] = (ulong)procaddr;
-    /* x1 - return address */
-    saddr[i++] = (ulong)retaddr;
-    /* Interrupt enabled flag in mstatus set as well previous
-     * privilege mode to macine mode and previous interrupt enabled
-     * flag to true so mret could be used to properly restore the
-     * machine status as well as to jump to newly created thread
+    /*
+     * Reservar espacio para los argumentos pasados por pila.
+     * Alinear hacia abajo la pila que verá la tarea al entrar.
+     *
+     * Se conserva la convención original de stackaddr como
+     * límite superior disponible.
      */
-    /* FS=11: the FPU must be enabled for the new thread too.  The
-     * interrupt trampolines save/restore the FP registers, and start.S
-     * enables the FPU for the boot context; without these bits ctxsw
-     * installs FS=0 and the first timer tick traps as an illegal
-     * instruction (csrrs ..., fcsr). */
-    saddr[i++] = MSTATUS_MIE | MSTATUS_MPP | MSTATUS_MPIE | MSTATUS_FS;
-    /* s0 - s11 */
-    for (; i < 15 ; i++)
-    {
-        saddr[i] = 0;
-    }
-    
-    /* register arguments (as part of context) and rest of arguments
-     * that did not fit into the registers  */
-    for (int j=0; j < nargs; j++)
-    {
-        saddr[i++] = va_arg(ap, ulong);
+    uintptr_t entry_sp = (uintptr_t)stackaddr;
+
+    entry_sp -= (uintptr_t)spilled_nargs * sizeof(ulong);
+    entry_sp &= ~(uintptr_t)0x0f;
+
+    ulong *stack_args = (ulong *)entry_sp;
+    ulong *context = stack_args - CONTEXT_WORDS;
+
+    /* Inicializar todos los campos del contexto. */
+    for (uint i = 0; i < CONTEXT_WORDS; ++i) {
+        context[i] = 0;
     }
 
-    /* rest of a registers (if any) */
-    for (; i < CONTEXT_WORDS ; i++)
-    {
-        saddr[i] = 0;
+    context[0] = (ulong)procaddr;
+    context[1] = (ulong)retaddr;
+
+    context[2] =
+        MSTATUS_MIE |
+        MSTATUS_MPP |
+        MSTATUS_MPIE |
+        MSTATUS_FS;
+
+    /*
+     * context[3..14]  = s0..s11
+     * context[15..22] = a0..a7
+     * stack_args[0]  = noveno argumento
+     */
+    for (uint j = 0; j < nargs; ++j) {
+        ulong arg = va_arg(ap, ulong);
+
+        if (j < MAX_REG_ARGS) {
+            context[15 + j] = arg;
+        } else {
+            stack_args[j - MAX_REG_ARGS] = arg;
+        }
     }
 
-    /* Return "top" of stack (lowest address). */
-    return saddr;
+    return context;
 }

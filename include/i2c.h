@@ -11,7 +11,7 @@
 #define _I2C_H_
 
 #include <device.h>
-#include <drivers/i2c/i2c.h>
+#include <device/i2c/i2c.h>
 
 /* control(I2C0, CMD, slave_addr7, arg) */
 #define I2C_CTRL_PROBE       0x01 /**< arg1=addr7           -> OK if found     */

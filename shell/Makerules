@@ -4,7 +4,8 @@
 COMP = shell
 
 # Source files for this component
-C_FILES = shell.c lexan.c getopt.c fsutil.c
+C_FILES = shell.c lexan.c getopt.c fsutil.c lcd_cube.c lcd_plasma.c 
+
 
 # General shell commands
 C_FILES += xsh_clear.c xsh_date.c xsh_echo.c xsh_exit.c xsh_help.c \
@@ -21,6 +22,9 @@ C_FILES += xsh_uartstat.c
 
 # Display commands
 C_FILES += xsh_lcd.c
+
+# Bus / low-level control commands (I2C master bus, GPIO pins)
+C_FILES += xsh_i2c.c xsh_gpio.c
 
 # Storage commands
 C_FILES += xsh_sd.c

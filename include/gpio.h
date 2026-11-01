@@ -11,7 +11,7 @@
 #define _GPIO_H_
 
 #include <device.h>
-#include <drivers/gpio/gpio.h>
+#include <device/gpio/gpio.h>
 
 /* gpioControl() commands: control(GPIO0, CMD, pin, value) */
 #define GPIO_CTRL_SET_DIR        0x01 /**< arg1=pin arg2=gpio_dir_t      */

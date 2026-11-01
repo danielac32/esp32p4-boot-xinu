@@ -36,7 +36,15 @@ shellcmd xsh_i2c(int nargs, char *args[])
 {
     unsigned long addr, reg, len;
     struct i2c_req req;
-
+     /* aqui hay un error dice no montado , pero en el inicio si  
+   int i2cdev=getdev("/dev/I2C0");
+    if (SYSERR == i2cdev)
+    {
+        fprintf(stderr, "i2c: /dev/i2c is not mounted\n");
+        return SYSERR;
+    }*/
+    int i2cdev=I2C0;
+    
     if (nargs < 2 || strcmp(args[1], "--help") == 0)
     {
         return i2c_usage(args[0]);
@@ -49,7 +57,7 @@ shellcmd xsh_i2c(int nargs, char *args[])
         printf("scanning I2C0 (0x03..0x77)...\n");
         for (a = 0x03; a <= 0x77; a++)
         {
-            if (control(I2C0, I2C_CTRL_PROBE, (long)a, 0) == OK)
+            if (control(i2cdev, I2C_CTRL_PROBE, (long)a, 0) == OK)
             {
                 printf("  found 0x%02lx\n", a);
                 found++;
@@ -74,7 +82,7 @@ shellcmd xsh_i2c(int nargs, char *args[])
         req.reg = (uint16_t)reg;
         req.buf = buf;
         req.len = (size_t)len;
-        if (control(I2C0, I2C_CTRL_READ_REGS, (long)addr, (long)&req) != OK)
+        if (control(i2cdev, I2C_CTRL_READ_REGS, (long)addr, (long)&req) != OK)
         {
             fprintf(stderr, "%s: read failed\n", args[0]);
             return SYSERR;
@@ -103,7 +111,7 @@ shellcmd xsh_i2c(int nargs, char *args[])
         req.reg = (uint16_t)reg;
         req.buf = buf;
         req.len = (size_t)len;
-        if (control(I2C0, I2C_CTRL_READ_REGS16, (long)addr, (long)&req) != OK)
+        if (control(i2cdev, I2C_CTRL_READ_REGS16, (long)addr, (long)&req) != OK)
         {
             fprintf(stderr, "%s: read failed\n", args[0]);
             return SYSERR;
@@ -131,7 +139,7 @@ shellcmd xsh_i2c(int nargs, char *args[])
         req.reg = (uint16_t)reg;
         req.buf = &v;
         req.len = 1;
-        if (control(I2C0, I2C_CTRL_WRITE_REG8, (long)addr, (long)&req) != OK)
+        if (control(i2cdev, I2C_CTRL_WRITE_REG8, (long)addr, (long)&req) != OK)
         {
             fprintf(stderr, "%s: write failed\n", args[0]);
             return SYSERR;
@@ -154,7 +162,7 @@ shellcmd xsh_i2c(int nargs, char *args[])
         req.reg = (uint16_t)reg;
         req.buf = &v;
         req.len = 1;
-        if (control(I2C0, I2C_CTRL_WRITE_REG16, (long)addr, (long)&req) != OK)
+        if (control(i2cdev, I2C_CTRL_WRITE_REG16, (long)addr, (long)&req) != OK)
         {
             fprintf(stderr, "%s: write failed\n", args[0]);
             return SYSERR;

@@ -41,7 +41,14 @@ CFILES  := abs.c      \
            strncpy.c  \
            strnlen.c  \
            strrchr.c  \
-           strstr.c
+           strstr.c   \
+           math_atangent.c \
+           math_newlib.c \
+           math_other.c \
+           math_pow.c \
+           math_sine.c \
+           math_tangent.c 
+
 
 # Add deprecated malloc and free if needed
 CFILES  += malloc.c free.c

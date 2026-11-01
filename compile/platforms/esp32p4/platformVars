@@ -60,7 +60,7 @@ LDFLAGS  += --no-warn-mismatch
 # + sdmmc-esp32p4 (SDMMC host: pads, clock tree, command engine, IDMAC)
 # + sdblock-esp32p4 (the microSD card: SD protocol over the SDMMC host)
 # + fat (the FAT volume on that card; the library lives in fatfs/).
-DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat
+DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat gpio i2c
 
 # ============================================================================
 # Imágenes de arranque del P4: SBL (bootloader de 2ª etapa) y ULP (firmware

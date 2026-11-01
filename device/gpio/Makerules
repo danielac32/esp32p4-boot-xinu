@@ -1,0 +1,15 @@
+# This Makefile contains rules to build files in the
+# device/gpio/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/gpio
+
+# Source files for this component.  The raw ESP32-P4 GPIO/IO_MUX driver
+# lives in this same directory; the kernel device glue (init + control)
+# wraps it behind control().
+C_FILES = gpioInit.c gpioControl.c gpio.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

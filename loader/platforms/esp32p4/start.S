@@ -87,6 +87,15 @@ ExceptionVectorTable:
 	.globl reset_handler
 	.func reset_handler
 reset_handler:
+/*
+	 * Inicializar gp sin permitir que el enlazador
+	 * transforme esta misma carga en un acceso relativo a gp.
+	 */
+	.option push
+	.option norelax
+	la gp, __global_pointer$
+	.option pop
+	
 	/* Only core 0 runs the kernel; park the rest. */
 	csrr t0, mhartid
 	bnez t0, park
