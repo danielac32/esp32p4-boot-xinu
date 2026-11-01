@@ -61,8 +61,9 @@ LDFLAGS  += --no-warn-mismatch
 # + sdblock-esp32p4 (the microSD card: SD protocol over the SDMMC host)
 # + fat (the FAT volume on that card; the library lives in fatfs/)
 # + touch (FT6336 capacitive panel hanging off the shared I2C0 bus)
-# + power (AXP2101 PMIC on that same bus; battery gauge, read-only).
-DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat gpio i2c touch power
+# + power (AXP2101 PMIC on that same bus; battery gauge, read-only)
+# + audio (ES8311 codec on that same bus; I2C control only until the I2S stage).
+DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat gpio i2c touch power audio
 
 # ============================================================================
 # Imágenes de arranque del P4: SBL (bootloader de 2ª etapa) y ULP (firmware

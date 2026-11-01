@@ -1,0 +1,19 @@
+# This Makefile contains rules to build files in the
+# device/audio/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/audio
+
+# Source files for this component.  Los drivers crudos (ES8311 por I2C, I2S0
+# por registros y el canal TX/IN del AHB-DMA) y las dos etapas de flujo viven en
+# este mismo directorio; el device del kernel es init + control + read/write:
+# por write() entra el PCM que hay que reproducir y por read() sale el que capta
+# el microfono.
+C_FILES = audioInit.c audioControl.c audioOps.c es8311.c i2s.c ahbdma.c \
+	  audioOut.c audioIn.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}
+

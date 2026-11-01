@@ -68,6 +68,51 @@ SECTIONS
 
     _etext = .;
 
+    /* ---- audio pages (PSRAM, direct-accessed) ------------------------- */
+    /* La cadena de descriptores y el anillo de muestras que el AHB-DMA lee
+     * para llenar el FIFO TX del I2S0.  Mismo reparto que las paginas del SD:
+     * el CPU las escribe por el acceso directo 0x88...... y el motor recibe la
+     * forma 0x48......, que es la que el entiende y la unica que cae dentro de
+     * su ventana (0x40000000..0x4FFC0000).  Una pagina para los descriptores
+     * y dos para las muestras: 8192 bytes = 2048 frames de 4 bytes = 42,7 ms
+     * de audio a 48 kHz, que es el anillo maximo.
+     *
+     * Van antes de .sdshare porque _psram_free_start se define a partir de
+     * _sd_block_page: asi el heap de PSRAM siempre arranca por encima de las
+     * dos secciones, sean cual sea sus tamanos.
+     *
+     * Las cuatro paginas siguientes son las dos parejas que comparten el motor
+     * por el otro camino: el anillo con el que se reproducen ficheros (el DMA
+     * lee) y el de la captura (el DMA escribe).  No salen del heap de PSRAM por
+     * lo mismo que las de arriba y las del SD: una peticion de malloc deja su
+     * cabecera en la misma linea de cache (128 bytes) que el principio de la
+     * lista, y entonces el CPU publica los descriptores por 0x88 mientras el
+     * motor los lee por una linea rancia de 0x48; cuando esa linea se expulsa,
+     * la imagen vieja pisa lo que ya se habia escrito.  Medido en placa en la
+     * E4d: la lista acababa llena de muestras y el motor se aparcaba con un
+     * descriptor rechazado.  Con la pagina aparte nadie toca esa linea por la
+     * via con cache, asi que no hay nada que mantenga el cache. */
+    .audioshare (NOLOAD) : ALIGN(4096)
+    {
+        _audio_desc_page = .;
+        . = . + 4096;
+        _audio_buf_page = .;
+        . = . + 8192;
+
+        /* Anillo de reproduccion: 32 trozos de 2048 bytes (STREAM_RING_BYTES). */
+        _audio_stream_desc_page = .;
+        . = . + 4096;
+        _audio_stream_buf_page = .;
+        . = . + 65536;
+
+        /* Anillo de captura: 32 trozos de 2048 bytes, los mismos que cierra un
+         * fin de recepcion del I2S (IN_CHUNK_BYTES). */
+        _audio_in_desc_page = .;
+        . = . + 4096;
+        _audio_in_buf_page = .;
+        . = . + 65536;
+    } > RAM
+
     /* ---- accelerator pages (PSRAM, direct-accessed) ------------------ */
     /* Two pages the SD block engine shares with the CPU: the first holds its
      * DMA descriptor, the second the block in transit.  They live in PSRAM

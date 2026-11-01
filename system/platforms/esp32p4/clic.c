@@ -60,13 +60,17 @@ static void p4_irq_default(void)
 void irq_missing(uint32_t cause);
 void irq_missing(uint32_t cause)
 {
-    volatile uint32_t *vt = (volatile uint32_t *)interruptVector;
+    volatile uint32_t *uart = (volatile uint32_t *)UART0_BASE;
+    uint32_t irq = cause & 0xffUL;
 
     kprintf("**** irq with null vector: mcause=0x%lx irq=%lu\r\n",
-            (ulong)cause, (ulong)(cause & 0xffUL));
-    kprintf("**** vt0..7 %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx\r\n",
-            (ulong)vt[0], (ulong)vt[1], (ulong)vt[2], (ulong)vt[3],
-            (ulong)vt[4], (ulong)vt[5], (ulong)vt[6], (ulong)vt[7]);
+            (ulong)cause, (ulong)irq);
+    kprintf("**** uart0 raw=0x%08x ena=0x%08x\r\n",
+            (ulong)uart[1],       /* int_raw, desvio 0x04 (p4uart.h)   */
+            (ulong)uart[3]);      /* int_ena, desvio 0x0C              */
+    kprintf("**** clic ip=0x%02x ie=0x%02x attr=0x%02x\r\n",
+            (uint)CLIC->interrupt[irq].ip, (uint)CLIC->interrupt[irq].ie,
+            (uint)CLIC->interrupt[irq].attr);
     for (;;)
     {
     }
