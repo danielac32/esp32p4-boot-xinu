@@ -34,6 +34,19 @@
 /* ------------------------------------------------------------------ */
 uint32_t sd_hwerr;                  /* why the last command failed     */
 uint32_t sd_clk_khz;                /* card clock once the card is up  */
+uint32_t sd_host_khz = SD_HOST_HZ / 1000UL;   /* bloque: 160 MHz / SD_HOST_DIV */
+/* Diagnostico de sdSetClockSlot: 0 si no fallo.  Cuando una subida de reloj
+ * devuelve FALSE, sd_clkdbg = (paso<<24)|(motivo<<20)|reintentos y
+ * sd_clkdbg_reg = la captura del registro en el instante del fallo (RINTSTS o
+ * CMD segun el motivo).  Paso 1 = detener reloj, 2 = fijar divisor,
+ * 3 = arrancar reloj.  Motivo 1 = no despeja CMD_START antes de lanzar,
+ * 2 = bit de error en RINTSTS, 3 = no despeja CMD_START tras lanzar,
+ * 4 = agotados los reintentos por HLE. */
+uint32_t sd_clkdbg;
+uint32_t sd_clkdbg_reg;
+uint32_t sd_clkdbg_cmd;      /* SDHOST_CMD en el instante del fallo        */
+uint32_t sd_clkdbg_status;   /* SDHOST_STATUS (inhibit) en el instante     */
+uint32_t sd_clkdbg_clkena;   /* SDHOST_CLKENA en el instante del fallo     */
 uint32_t sd_host_lba;               /* cursor for the SDMMC0 device    */
 uint8_t sd_host_width = 1;
 bool sd_host_ready = FALSE;
@@ -231,12 +244,37 @@ static bool sdWaitCmdTaken(void)
     return TRUE;
 }
 
+/** Snapshot the controller state so a failed clock update can be diagnosed. */
+static void sdClockDbgCapture(uint32_t step, uint32_t reason, uint32_t tries,
+                              uint32_t reg)
+{
+    sd_clkdbg        = (step << 24) | (reason << 20) | tries;
+    sd_clkdbg_reg    = reg;
+    sd_clkdbg_cmd    = SD_REG(SDHOST_CMD);
+    sd_clkdbg_status = SD_REG(SDHOST_STATUS);
+    sd_clkdbg_clkena = SD_REG(SDHOST_CLKENA);
+}
+
 /**
  * Ask the controller to push the clock registers out to the card clock
- * generation unit.  The update command has no card index and no response;
- * the hardware sets HLE on success, which is expected and needs a retry.
+ * generation unit for \p slot.  The update command carries the slot index in
+ * CMD[20:16] but has no argument and no response; the hardware sets HLE on
+ * success, which is expected and needs a retry.  \p step labels which update of
+ * a sdSetClockSlotEx this is (1 detener, 2 divisor, 3 arrancar, 5 live), only
+ * for the failure diagnostic in sd_clkdbg.
+ *
+ * \p waitComplete es la decision delicada.  CMD[13]=1 dice "espera a que la
+ * transferencia de datos anterior termine" antes de cambiar el reloj, y el
+ * WAIT_COMPLETE se queda mirando data_busy (STATUS[9], que es el valor
+ * muestreado de card_data[0]).  Un slave esp_hosted deja DAT0 abajo durante la
+ * identificacion, y ese muestreo solo se refresca con el reloj del slot
+ * corriendo: con CLKENA bajado el bit queda clavado y el update no termina
+ * nunca -- CMD_START no se auto-limpia y a partir de ahi TODO comando del slot
+ * falla (el enquistamiento medido: STATUS=0x0001a306, RINTSTS HLE).  Con
+ * waitComplete=0 el update se lanza de una vez; es lo correcto entre
+ * transacciones, porque el update_clk no envia nada a la tarjeta.
  */
-static bool sdClockUpdate(void)
+static bool sdClockUpdateSlot(uint32_t slot, uint32_t step, bool waitComplete)
 {
     uint tries;
 
@@ -246,13 +284,16 @@ static bool sdClockUpdate(void)
 
         if (!sdWaitCmdTaken())
         {
+            sdClockDbgCapture(step, 1U, tries, SD_REG(SDHOST_RINTSTS));
             return FALSE;
         }
 
         SD_REG(SDHOST_RINTSTS) = SD_IRQ_ALL;
         SD_REG(SDHOST_CMDARG) = 0;
-        SD_REG(SDHOST_CMD) = SD_CMD_UPDATE_CLK | SD_CMD_WAIT_COMPLETE
-                             | SD_CMD_USE_HOLD | (SD_SLOT << SD_CMD_CARD_NUM_POS)
+        SD_REG(SDHOST_CMD) = SD_CMD_UPDATE_CLK
+                             | (waitComplete ? SD_CMD_WAIT_COMPLETE : 0U)
+                             | SD_CMD_USE_HOLD
+                             | ((slot & 0x1FU) << SD_CMD_CARD_NUM_POS)
                              | SD_CMD_START;
 
         t0 = sdNow();
@@ -269,6 +310,7 @@ static bool sdClockUpdate(void)
             if (raw & SD_CMD_ERR_MASK)
             {
                 SD_REG(SDHOST_RINTSTS) = raw;
+                sdClockDbgCapture(step, 2U, tries, raw);
                 return FALSE;
             }
             if (0 == (SD_REG(SDHOST_CMD) & SD_CMD_START))
@@ -278,48 +320,188 @@ static bool sdClockUpdate(void)
             }
             if (sdTimedOut(t0, SD_TO_CMD_MS))
             {
+                sdClockDbgCapture(step, 3U, tries, SD_REG(SDHOST_RINTSTS));
                 return FALSE;
             }
         }
     }
+    /* HLE raised on all 16 tries: the clock update never settled. */
+    sdClockDbgCapture(step, 4U, 16U, SD_REG(SDHOST_RINTSTS));
     return FALSE;
 }
 
 /**
- * Set this slot's card clock divider.  The global divider that feeds both
- * slots was fixed at controller init and is not touched here.
+ * Change \p slot's card clock divider.  El divisor global del bloque se fija en
+ * sdSdioClockInit() y solo lo mueve quien llame a sdSetHostDiv(); aqui se usa su
+ * valor actual (sd_host_khz) para reportar la velocidad resultante.
+ *
+ * CLKSRC no es una seleccion de "salidas del divisor global": sdhost_clksrc_reg_t
+ * (soc/sdmmc_struct.h hw_ver3) enlaza cada slot con una de las CUATRO divisiones
+ * internas del bloque, y la division n es el byte n de CLKDIV (clk_divider0
+ * [7:0], clk_divider1 [15:8], ...).  Por eso el valor correcto del campo de un
+ * slot es SU PROPIO numero: slot 0 -> 0, slot 1 -> 1 (igual que hace el SDK en
+ * sdmmc_ll_set_card_clock_div, que fuerza clksrc.card1 = 1 para el slot 1).
+ * Poner el campo a 0 en el slot 1 lo enlaza a la division de la microSD: los
+ * bytes 1 de CLKDIV se escriben pero no gobiernan nada, y el C6 queda a merced
+ * del reloj que la SD tenga puesto en ese momento.
+ *
+ * Los demas campos por-slot: CLKENA bit \p slot (enable) y bit 16+\p slot
+ * (low power).
+ *
+ * \p stopClock /\p waitComplete dan las tres variantes publicas:
+ *   - parada + espera: la secuencia clasica, la que us6 siempre el slot 0.
+ *   - sin parar + espera: por si el busy se drena muestreando con el reloj vivo.
+ *   - sin parar + sin espera: la unica segura con un slave que mantiene DAT0
+ *     abajo, porque no deja el reloj apagado esperando un bit que ya no se
+ *     muestrea (ver sdClockUpdateSlot).
  */
-bool sdSetClock(uint8_t card_div)
+static bool sdSetClockSlotEx(uint32_t slot, uint8_t card_div, bool stopClock,
+                             bool waitComplete)
 {
-    /* Stop the card clock before touching the dividers. */
-    SD_REG(SDHOST_CLKENA) &= ~SD_CLKENA_CARD0;
-    if (!sdClockUpdate())
+    uint32_t ena     = 1UL << slot;
+    uint32_t lpena   = 1UL << (16 + slot);
+    uint32_t divmask = 0xFFUL << (8 * slot);
+    uint32_t srcmask = 0x3UL << (2 * slot);
+
+    sd_clkdbg = 0;
+
+    if (stopClock)
     {
+        /* Stop this slot's card clock before touching the dividers. */
+        SD_REG(SDHOST_CLKENA) &= ~ena;
+        if (!sdClockUpdateSlot(slot, 1U, waitComplete))
+        {
+            sd_hwerr = SD_HWERR_TIMEOUT | SD_REG(SDHOST_STATUS);
+            return FALSE;
+        }
+    }
+    else
+    {
+        /* Dejar el reloj del slot puesto para que la linea DAT0 siga
+         * muestrandose mientras el controlador ejecuta el update. */
+        SD_REG(SDHOST_CLKENA) |= ena;
+    }
+
+    /* Enlazar el slot con su propia division interna y escribir esa division
+     * (divide entre 2*n; n = 0 la salta). */
+    SD_REG(SDHOST_CLKSRC) = (SD_REG(SDHOST_CLKSRC) & ~srcmask)
+                            | ((slot & 3UL) << (2 * slot));
+    SD_REG(SDHOST_CLKDIV) = (SD_REG(SDHOST_CLKDIV) & ~divmask)
+                            | ((uint32_t)card_div << (8 * slot));
+
+    if (!sdClockUpdateSlot(slot, 2U, waitComplete))
+    {
+        sd_hwerr = SD_HWERR_TIMEOUT | SD_REG(SDHOST_STATUS);
         return FALSE;
     }
 
-    /* Slot 0 reads divider 0 (CLKSRC.card0 = 0) and divides by 2*n. */
-    SD_REG(SDHOST_CLKSRC) = (SD_REG(SDHOST_CLKSRC)
-                             & ~0x3U) | SD_CLKSRC_CARD0_DIV0;
-    SD_REG(SDHOST_CLKDIV) = (SD_REG(SDHOST_CLKDIV)
-                             & ~SD_CLKDIV_CARD0_MASK) | card_div;
-
-    if (!sdClockUpdate())
+    SD_REG(SDHOST_CLKENA) |= ena;
+    if (!sdClockUpdateSlot(slot, 3U, waitComplete))
     {
+        sd_hwerr = SD_HWERR_TIMEOUT | SD_REG(SDHOST_STATUS);
         return FALSE;
     }
 
-    SD_REG(SDHOST_CLKENA) |= SD_CLKENA_CARD0;
-    if (!sdClockUpdate())
-    {
-        return FALSE;
-    }
+    SD_REG(SDHOST_CLKENA) |= lpena;
 
-    SD_REG(SDHOST_CLKENA) |= SD_CLKENA_LOW_POWER0;
-
-    sd_clk_khz = (uint32_t)(SD_HOST_HZ /
+    sd_clk_khz = (uint32_t)(sd_host_khz * 1000UL /
                             ((card_div == 0) ? 1UL : (uint32_t)card_div * 2UL)
                             / 1000UL);
+    return TRUE;
+}
+
+bool sdSetClockSlot(uint32_t slot, uint8_t card_div)
+{
+    return sdSetClockSlotEx(slot, card_div, TRUE, TRUE);
+}
+
+/** Set slot 0's card clock divider (this driver's own slot). */
+bool sdSetClock(uint8_t card_div)
+{
+    return sdSetClockSlot(SD_SLOT, card_div);
+}
+
+bool sdSetClockSlotLive(uint32_t slot, uint8_t card_div)
+{
+    return sdSetClockSlotEx(slot, card_div, FALSE, TRUE);
+}
+
+bool sdSetClockSlotNoWait(uint32_t slot, uint8_t card_div)
+{
+    return sdSetClockSlotEx(slot, card_div, FALSE, FALSE);
+}
+
+/**
+ * Imprimir el estado del camino de un slot, descifrado campo a campo desde el
+ * propio STATUS (sdhost_status_reg_t).  Lo que importa saber en cada paso de
+ * una secuencia SDIO es data_busy: con DAT0 afirmado por el esclavo, el comando
+ * interno "update clock" (y cualquier comando con wait_complete) queda
+ * inhibido, y si ademas el reloj del slot esta parado ese busy no se muestrea
+ * jamas.  CLKDIV/CLKSRC se imprimen crudos para ver a que division interna
+ * (byte de CLKDIV) esta enlazado el slot en ese instante.
+ */
+void sdBusState(const char *tag, uint32_t slot)
+{
+    uint32_t st = SD_REG(SDHOST_STATUS);
+    uint32_t dv = SD_REG(SDHOST_CLKDIV);
+    uint32_t cs = SD_REG(SDHOST_CLKSRC);
+
+    kprintf("  %s STATUS=0x%08x fifo_empty=%u fifo_count=%u fsm=%u "
+            "presente=%u data_busy=%u dat_path=%u ultimo_cmd=%u CLKENA=0x%08x"
+            " | CLKDIV%u=%u CLKSRC%u=%u\r\n",
+            tag, st,
+            (st & SD_STATUS_FIFO_EMPTY) ? 1U : 0U,
+            (st & SD_STATUS_FIFO_COUNT_MASK) >> SD_STATUS_FIFO_COUNT_POS,
+            (st & SD_STATUS_FSM_MASK) >> SD_STATUS_FSM_POS,
+            (st & SD_STATUS_CARD_PRESENT) ? 1U : 0U,
+            (st & SD_STATUS_DATA_BUSY) ? 1U : 0U,
+            (st & SD_STATUS_DAT_PATH_BUSY) ? 1U : 0U,
+            (st & SD_STATUS_RESP_IDX_MASK) >> SD_STATUS_RESP_IDX_POS,
+            SD_REG(SDHOST_CLKENA),
+            (unsigned)slot, (unsigned)((dv >> (8 * slot)) & 0xFFU),
+            (unsigned)slot, (unsigned)((cs >> (2 * slot)) & 3U));
+}
+
+/**
+ * Fijar el DIVISOR GLOBAL sdio_ls (HP_SYS_CLKRST.peri_clk_ctrl02), el reloj
+ * base del que salen los dos slots.  El periodo es (l + 1) ciclos de la fuente
+ * y la fase alta (h + 1) de ellos, con los tres campos de 4 bits: o sea que
+ * solo se puede dividir entre 1 y 16, y el minimo del bloque es 160/16 = 10 MHz.
+ *
+ * Por que es una funcion y no una constante del init: el driver de referencia
+ * del C6 NUNCA usa el divisor por-slot durante una fase de datos -- baja el
+ * divisor GLOBAL y deja card_div=0 (salto) para la velocidad de trabajo
+ * (host_div=7 -> 22,857 MHz exactos).  Asi el reloj que muestrea el CIU es el
+ * mismo que sale por la pata, que es lo que suponen las fases drv/sam/slf.
+ * Con nuestro slot 1 enrutado por la matriz GPIO --que anade retardo en los dos
+ * sentidos-- esa coherencia puede ser justamente lo que falte, asi que poder
+ * mover el global desde la sonda es el experimento.  El init del host lo deja
+ * en SD_HOST_DIV y la sonda lo restaura al terminar.
+ */
+bool sdSetHostDiv(uint32_t div)
+{
+    uint32_t edge;
+
+    if (div < 1UL || div > 16UL)
+    {
+        return FALSE;
+    }
+
+    edge = sdRegRead(P4_CLKRST_PERI_CTRL02, 0);
+    edge &= ~((P4_EDGE_MASK << P4_SDIO_LS_EDGE_L_POS)
+              | (P4_EDGE_MASK << P4_SDIO_LS_EDGE_H_POS)
+              | (P4_EDGE_MASK << P4_SDIO_LS_EDGE_N_POS));
+    edge |= ((div / 2UL - 1UL) & P4_EDGE_MASK) << P4_SDIO_LS_EDGE_H_POS;
+    edge |= ((div - 1UL) & P4_EDGE_MASK) << P4_SDIO_LS_EDGE_L_POS;
+    edge |= ((div - 1UL) & P4_EDGE_MASK) << P4_SDIO_LS_EDGE_N_POS;
+    sdRegWrite(P4_CLKRST_PERI_CTRL02, 0, edge);
+
+    /* The divider and phase fields only take effect on an update pulse. */
+    sdRegOr(P4_CLKRST_PERI_CTRL02, 0, P4_SDIO_LS_EDGE_UPDATE);
+    sdRegClear(P4_CLKRST_PERI_CTRL02, 0, P4_SDIO_LS_EDGE_UPDATE);
+    udelay(10);
+
+    sd_host_khz = (uint32_t)(SD_CLK_SRC_HZ / div / 1000UL);
     return TRUE;
 }
 
@@ -331,8 +513,6 @@ bool sdSetClock(uint8_t card_div)
  */
 static bool sdSdioClockInit(void)
 {
-    uint32_t edge;
-
     sdRegOr(P4_CLKRST_SOC_CTRL1, 0, P4_SDMMC_SYS_CLK_EN);
 
     /* The PLL needs its power domain, its ICG and its three output gates
@@ -351,16 +531,8 @@ static bool sdSdioClockInit(void)
     sdRegClear(P4_CLKRST_PERI_CTRL01, 0, P4_SDIO_LS_SRC_SEL | P4_SDIO_HS_MODE);
     sdRegOr(P4_CLKRST_PERI_CTRL01, 0, P4_SDIO_LS_CLK_EN);
 
-    /* Global divider: the period is (l + 1) source cycles and the high
-     * phase (h + 1) of them, so SD_HOST_DIV = 4 gives 40 MHz at 50 %. */
-    edge = sdRegRead(P4_CLKRST_PERI_CTRL02, 0);
-    edge &= ~((P4_EDGE_MASK << P4_SDIO_LS_EDGE_L_POS)
-              | (P4_EDGE_MASK << P4_SDIO_LS_EDGE_H_POS)
-              | (P4_EDGE_MASK << P4_SDIO_LS_EDGE_N_POS));
-    edge |= ((SD_HOST_DIV / 2 - 1) & P4_EDGE_MASK) << P4_SDIO_LS_EDGE_H_POS;
-    edge |= ((SD_HOST_DIV - 1) & P4_EDGE_MASK) << P4_SDIO_LS_EDGE_L_POS;
-    edge |= ((SD_HOST_DIV - 1) & P4_EDGE_MASK) << P4_SDIO_LS_EDGE_N_POS;
-    sdRegWrite(P4_CLKRST_PERI_CTRL02, 0, edge);
+    /* Global divider: SD_HOST_DIV = 4 gives 40 MHz at 50 % duty. */
+    sdSetHostDiv(SD_HOST_DIV);
 
     /* Sampling and output phases: drive the outgoing clock/data one phase
      * late and sample on the unperturbed edge, which is what an HS-mode
@@ -404,6 +576,23 @@ static bool sdResetController(void)
 }
 
 /**
+ * Reset de protocolo del BLOQUE entero, forzado.  Hace falta despues de una
+ * fase de datos muerta (un CMD53 del slot 1 al que el esclavo no contesto):
+ * mientras no se hace, STATUS.data_state_mc_busy queda en 1 y ese bit inhibe el
+ * "update clock" de CUALQUIER slot, o sea que el slot 0 no puede ni cambiar de
+ * reloj y la microSD no vuelve hasta reiniciar la placa.  No lo cubre
+ * sdControllerInit(), que solo resetea si los bits de CTRL vienen ya alzados --
+ * y un fallo los deja bajados--, y tampoco los reseteos parciales de sdDataAbort
+ * (FIFO y DMA cada uno por su lado), que dejan la maquina de estados de datos
+ * donde estaba.  Los tres bits se auto-limpian; si alguno se queda, es que el
+ * bloque no tiene reloj y ya no hay nada que hacer por software.
+ */
+bool sdBlockReset(void)
+{
+    return sdResetController();
+}
+
+/**
  * Let a bus master reach the L2 cache block.  It comes out of reset with
  * DMA access shut (CACHE_L2_CACHE_SHUT_DMA = 1), and a master then reads
  * zeros and its writes are dropped.  ESP-IDF clears it on every boot
@@ -414,7 +603,7 @@ static bool sdResetController(void)
 #define SD_L2_CACHE_CTRL     0x270U
 #define SD_L2_SHUT_DMA       (1UL << 4)
 
-static void sdEngineBusOpen(void)
+static void __attribute__((unused)) sdEngineBusOpen(void)
 {
     sdRegClear(SD_L2_CACHE_BASE, SD_L2_CACHE_CTRL, SD_L2_SHUT_DMA);
 }
@@ -431,7 +620,9 @@ bool sdControllerInit(void)
 {
     uint32_t t0;
 
-    sdEngineBusOpen();
+    /* [BISECCION temporal] sin abrir el camino DMA del L2: es lo unico que el
+     * arranque de HEAD no hace y pisa la linea 0x4ff0fc80. */
+    /* sdEngineBusOpen(); */
 
     if (!sdSdioClockInit())
     {
@@ -500,13 +691,20 @@ bool sdControllerInit(void)
 /* ------------------------------------------------------------------ */
 
 /**
- * Send one command and, if it expects a response, wait for it.
+ * Send one command to \p slot and, if it expects a response, wait for it.
+ * The slot is named by CMD[20:16]; the two slots share one block, so this is
+ * how the microSD driver (slot 0) and the ESP32-C6 SDIO probe (slot 1) reach
+ * the same command engine.
  *
  * \p resp is 0 (none), 1 (short, 48 bit) or 2 (long, 136 bit).
  * \p crc asks the controller to verify the response CRC, which only
  * makes sense for the commands whose responses actually carry one.
+ * \p send_init sets CMD.SEND_INIT: the controller performs the SD/SDIO
+ * power-up sequence (>=74 clocks on this slot with CMD high) before the
+ * command, which is how ESP-IDF resets an SDIO slave on its CMD0.
  */
-bool sdSendCmd(uint idx, uint32_t arg, uint resp, bool crc, uint32_t *r0)
+bool sdSendCmdSlot(uint32_t slot, uint idx, uint32_t arg, uint resp, bool crc,
+                   bool send_init, uint32_t *r0)
 {
     uint32_t cmd;
     uint32_t t0;
@@ -522,7 +720,11 @@ bool sdSendCmd(uint idx, uint32_t arg, uint resp, bool crc, uint32_t *r0)
 
     cmd = (uint32_t)(idx & SD_CMD_INDEX_MASK)
           | SD_CMD_WAIT_COMPLETE | SD_CMD_USE_HOLD
-          | (SD_SLOT << SD_CMD_CARD_NUM_POS);
+          | ((slot & 0x1FU) << SD_CMD_CARD_NUM_POS);
+    if (send_init)
+    {
+        cmd |= SD_CMD_SEND_INIT;
+    }
     if (resp != 0)
     {
         cmd |= SD_CMD_RESP_EXPECT;
@@ -571,6 +773,23 @@ bool sdSendCmd(uint idx, uint32_t arg, uint resp, bool crc, uint32_t *r0)
             return FALSE;
         }
     }
+}
+
+/** Send one command on slot 0 (this driver's own slot). */
+bool sdSendCmd(uint idx, uint32_t arg, uint resp, bool crc, uint32_t *r0)
+{
+    return sdSendCmdSlot(SD_SLOT, idx, arg, resp, crc, FALSE, r0);
+}
+
+/**
+ * The SDHOST block register base as a word-indexable pointer.  The SDIO probe
+ * in device/sdio-esp32p4 needs the few per-slot fields the command engine
+ * does not parameterise (CTYPE width, CLKENA, CLKDIV) and reaches them through
+ * here rather than duplicating the private register map.
+ */
+volatile uint32_t *sdHostRegBase(void)
+{
+    return (volatile uint32_t *)(uintptr_t)SDHOST_BASE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -822,4 +1041,217 @@ void sdBlockCopyOut(void *dst, uint bytes)
 void sdBlockCopyIn(const void *src, uint bytes)
 {
     memcpy(sd_bounce, src, bytes);
+}
+
+/**
+ * Devolver el camino de datos del bloque a un estado neutro cuando una
+ * transferencia del slot 1 falla a mitad.
+ *
+ * El IDMA, el FIFO y el RINTSTS son recursos del BLOCK, no del slot: si un
+ * CMD53 del C6 se va por timeout dejando el motor armed o la FIFO con restos,
+ * el siguiente CMD17 de la microSD (slot 0) hereda ese estado y falla.  Medido
+ * en placa: tras un CMD53 enquistado, 'ls' devolvia el directorio vacio porque
+ * el primer bloque del directorio raiz no llegaba.  Por eso el abort hace aqui
+ * lo mismo que la entrada de sdDmaBlock/sdTransferSlot: apagar la DMA
+ * interna, resetear FIFO e IDMAC y limpiar todas las banderas.
+ */
+static void sdDataAbort(void)
+{
+    SD_REG(SDHOST_BMOD) = 0;
+    SD_REG(SDHOST_CTRL) &= ~(SD_CTRL_DMA_ENABLE | SD_CTRL_USE_INTERNAL_DMA);
+    SD_REG(SDHOST_IDINTEN) = 0;
+    SD_REG(SDHOST_RINTSTS) = SD_IRQ_ALL;
+    (void)sdFifoReset();
+    (void)sdDmaReset();
+}
+
+/**
+ * Fase de datos de un comando SDIO sobre \p slot, por la misma rebote de 512
+ * bytes y el mismo IDMA que sdDmaBlock, pero con el comando, el argumento, el
+ * tamano de bloque y el numero de bytes puestos por el llamante (CMD53 de la
+ * funcion 1 del C6).  Es el sdDmaBlock del slot 0 generalizado:
+ *
+ *   - no reinterpreta la respuesta como R1 de tarjeta (SDIO responde R5/R6);
+ *     aqui CMD_DONE solo confirma que el comando se acepto.
+ *   - no aplica la transformacion LBA (el argumento CMD53 ya viene armado).
+ *   - admite bytcnt <= 512 (byte-mode de una pasada; la rebote es de un sector).
+ *
+ * El llamante sostiene el candado del bus y prepara la rebote: para escribir
+ * coloca los bytes con sdBlockCopyIn() antes de llamar; para leer los saca con
+ * sdBlockCopyOut() despues de que devuelva TRUE.  \p blksiz es el tamano de
+ * bloque del controlador (byte-mode: igual que bytcnt); \p write=TRUE manda
+ * CMD.RW (host -> dispositivo).
+ */
+bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
+                    uint32_t blksiz, bool write)
+{
+    uint32_t cmdval;
+    uint32_t raw;
+    uint32_t ids;
+    uint32_t done;
+    uint32_t t0;
+
+    if (bytcnt == 0 || bytcnt > SD_BLOCK_SIZE || blksiz == 0)
+    {
+        sd_hwerr = SD_HWERR_ERR;
+        return FALSE;
+    }
+
+    sd_hwerr = 0;
+    done = write ? SD_IDSTS_TI : SD_IDSTS_RI;
+
+    /* Un solo descriptor: estos bytcnt bytes en la rebote, y la cadena acaba
+     * aqui.  La direccion la entiende el motor (0x48 PSRAM), la CPU ve la
+     * rebote por la ventana directa sin caché (0x88). */
+    sd_desc->ctrl = SD_DESC_OWN | SD_DESC_FIRST | SD_DESC_LAST
+                    | SD_DESC_SECOND_ADDR | SD_DESC_RING_END;
+    sd_desc->sizes = bytcnt;
+    sd_desc->buffer = (uint32_t)(uintptr_t)_sd_block_page;
+    sd_desc->next = 0;
+
+    /* Limpieza previa del camino de datos.  Depende del slot:
+     *   - Slot 0 (microSD): exige bus libre ANTES de armar.  Es el camino que
+     *     monta la FAT en el arranque; aqui el slave nunca mantiene DAT0
+     *     afirmado, asi que la espera es barata y su resultado vinculante.
+     *   - Slot 1 (esp_hosted en el C6): el slave mantiene DAT0 a bajo mientras
+     *     tiene un paquete C2H sin leer, y eso es data_busy en el STATUS.  Si
+     *     aqui se exigiera bus libre, todo CMD53 abortaria antes de lanzarse
+     *     (chicken-and-egg: solo un CMD53 que lea la FIFO consume el paquete y
+     *     libera DAT0).  Por eso en el slot 1 el wait de entrada es lo mejor
+     *     posible (se ignora su resultado): el reset de FIFO y DMA que sigue
+     *     limpia el camino del host de todas formas.  El gate del FINAL es
+     *     estricto en ambos slots: es lo que impide dar por buena una
+     *     transferencia que en realidad no movio dato. */
+    if (slot == 1U)
+    {
+        (void)sdWaitDataIdle();
+        if (!sdWaitCmdTaken() || !sdFifoReset() || !sdDmaReset())
+        {
+            sd_hwerr = SD_HWERR_INHIBIT | SD_REG(SDHOST_STATUS);
+            return FALSE;
+        }
+    }
+    else
+    {
+        if (!sdWaitDataIdle() || !sdWaitCmdTaken()
+            || !sdFifoReset() || !sdDmaReset())
+        {
+            sd_hwerr = SD_HWERR_INHIBIT | SD_REG(SDHOST_STATUS);
+            return FALSE;
+        }
+    }
+
+    /* Armar el motor: fetch de descriptor, sus interrupciones (RI/TI es como
+     * se escucha el fin), burst fijo, y el poll demand que lo pone a leer el
+     * descriptor. */
+    SD_REG(SDHOST_CTRL) |= SD_CTRL_DMA_ENABLE;
+    SD_REG(SDHOST_BMOD) = 0;
+    SD_REG(SDHOST_BMOD) = SD_BMOD_SW_RESET;
+    SD_REG(SDHOST_IDINTEN) = SD_IDSTS_RI | SD_IDSTS_TI | SD_IDSTS_NI;
+    SD_REG(SDHOST_CTRL) |= SD_CTRL_DMA_ENABLE | SD_CTRL_USE_INTERNAL_DMA;
+    SD_REG(SDHOST_BMOD) = SD_BMOD_ENABLE | SD_BMOD_FB;
+
+    SD_REG(SDHOST_RINTSTS) = SD_IRQ_ALL;
+    SD_REG(SDHOST_IDSTS) = SD_IDSTS_ALL;
+    SD_REG(SDHOST_BLKSIZ) = blksiz;
+    SD_REG(SDHOST_BYTCNT) = bytcnt;
+    SD_REG(SDHOST_CMDARG) = arg;
+    SD_REG(SDHOST_DBADDR) = (uint32_t)(uintptr_t)_sd_desc_page;
+    SD_REG(SDHOST_PLDMND) = 1;
+
+    cmdval = (uint32_t)(idx & SD_CMD_INDEX_MASK)
+             | SD_CMD_RESP_EXPECT | SD_CMD_RESP_CRC | SD_CMD_DATA_EXPECTED
+             | SD_CMD_WAIT_COMPLETE | SD_CMD_USE_HOLD
+             | ((slot & 0x1FU) << SD_CMD_CARD_NUM_POS);
+    if (write)
+    {
+        cmdval |= SD_CMD_RW;
+    }
+    SD_REG(SDHOST_CMD) = cmdval | SD_CMD_START;
+
+    if (!sdWaitCmdTaken())
+    {
+        sd_hwerr = SD_HWERR_INHIBIT | SD_REG(SDHOST_RINTSTS);
+        sdDataAbort();
+        return FALSE;
+    }
+
+    /* El comando se acepta primero (CMD_DONE, sin comprobar R1: es SDIO); el
+     * motor mueve el dato despues. */
+    t0 = sdNow();
+    for (;;)
+    {
+        raw = SD_REG(SDHOST_RINTSTS);
+
+        if (raw & SD_CMD_ERR_MASK)
+        {
+            SD_REG(SDHOST_RINTSTS) = raw;
+            sd_hwerr = SD_HWERR_ERR | (raw & SD_CMD_ERR_MASK);
+            sdDataAbort();
+            return FALSE;
+        }
+        if (raw & SD_IRQ_CMD_DONE)
+        {
+            SD_REG(SDHOST_RINTSTS) = raw & ~SD_IRQ_DATA_OVER;
+            break;
+        }
+        if (sdTimedOut(t0, SD_TO_CMD_MS))
+        {
+            SD_REG(SDHOST_RINTSTS) = SD_IRQ_ALL;
+            sd_hwerr = SD_HWERR_TIMEOUT | raw;
+            sdDataAbort();
+            return FALSE;
+        }
+    }
+
+    /* Después el bloque: RI/TI dice que el descriptor terminó; DATA_OVER que
+     * el dispositivo ya soltó el bus. */
+    t0 = sdNow();
+    for (;;)
+    {
+        ids = SD_REG(SDHOST_IDSTS);
+        raw = SD_REG(SDHOST_RINTSTS);
+
+        if ((ids & SD_IDSTS_ERR_MASK) != 0 || (raw & SD_DATA_ERR_MASK) != 0)
+        {
+            sd_hwerr = SD_HWERR_DMA | ids | (raw & SD_DATA_ERR_MASK);
+            break;
+        }
+        if ((ids & done) != 0 && (raw & SD_IRQ_DATA_OVER) != 0)
+        {
+            SD_REG(SDHOST_RINTSTS) = raw;
+            SD_REG(SDHOST_IDSTS) = ids;
+            SD_REG(SDHOST_BMOD) = 0;
+            SD_REG(SDHOST_CTRL) &= ~(SD_CTRL_DMA_ENABLE
+                                     | SD_CTRL_USE_INTERNAL_DMA);
+            SD_REG(SDHOST_IDINTEN) = 0;
+            if (!sdWaitDataIdle())
+            {
+                sd_hwerr = SD_HWERR_TIMEOUT | SD_REG(SDHOST_STATUS);
+                return FALSE;
+            }
+            return TRUE;
+        }
+        /* Relanzar el motor si se quedó suspendido esperando un pedido de
+         * FIFO (igual que el poll-demand del driver de referencia). */
+        {
+            uint32_t fsm = SD_IDSTS_FSM(ids);
+
+            if (fsm == SD_DMA_FSM_SUSPEND || fsm == SD_DMA_FSM_RD_REQ_WAIT
+                || fsm == SD_DMA_FSM_WR_REQ_WAIT)
+            {
+                SD_REG(SDHOST_PLDMND) = 1;
+            }
+        }
+        if (sdTimedOut(t0, SD_TO_DATA_MS))
+        {
+            sd_hwerr = SD_HWERR_TIMEOUT | ids;
+            break;
+        }
+    }
+
+    /* El camino de datos es del bloque, no del slot: dejarlo neutro para que
+     * la microSD (slot 0) no herede el motor a medio armar. */
+    sdDataAbort();
+    return FALSE;
 }

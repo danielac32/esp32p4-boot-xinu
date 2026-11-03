@@ -28,15 +28,22 @@ C_FILES += xsh_lcd.c
 C_FILES += xsh_i2c.c xsh_gpio.c xsh_touchpanel.c xsh_power.c xsh_audio.c
 
 # Boot-time dashboard task (main.c spawns it after bootTask)
-C_FILES += xsh_dash.c
+C_FILES += xsh_dash.c p4demoTask.c
 
 # Storage commands
 C_FILES += xsh_sd.c
+
+# WiFi over the ESP32-C6 (SDIO slot 1 del host compartido)
+C_FILES += xsh_wifi.c
 
 # Filesystem commands (FAT volume on the microSD)
 C_FILES += xsh_pwd.c xsh_cd.c xsh_ls.c xsh_cat.c xsh_head.c xsh_tail.c \
            xsh_cp.c xsh_mv.c xsh_rm.c xsh_mkdir.c xsh_rmdir.c xsh_stat.c \
            xsh_df.c xsh_format.c xsh_hexdump.c xsh_touch.c xsh_test.c
+
+# Ejercicio ELF: el binario cargable lo genera 'make' en
+# examples/p4-elfapp (app_elf.h); aqui solo vive el cargador.
+C_FILES += xsh_elfapp.c
 
 
 S_FILES =

@@ -447,40 +447,60 @@ int fatfs_fat_add_cluster_to_chain(struct fatfs *fs, uint32 start_cluster, uint3
 // cluster of the volume are readable and zero: scanning the whole FAT
 // reports free clusters that the volume does not have.  Callers pass
 // clusters + 2, since entries 0 and 1 are the reserved pair.
+//
+// `buf` holds `buf_sectors` sectors and belongs to the caller: reading the
+// FAT one sector at a time costs 1,8 ms por sector en esta tarjeta (un SEEK,
+// un bloqueo de bus y un CMD17 cada uno), y la copia entera son ~15k sectores
+// -> 27 s.  Leyendo en rafagas de 128 sectores el SEEK y los bloqueos se
+// pagan una vez por rafaga y el escaneo baja a segundos.
 //-----------------------------------------------------------------------------
-uint32 fatfs_count_free_clusters(struct fatfs *fs, uint32 entry_limit)
+uint32 fatfs_count_free_clusters(struct fatfs *fs, uint32 entry_limit,
+                                 uint8 *buf, uint32 buf_sectors)
 {
-    uint32 i,j;
     uint32 count = 0;
     uint32 entries = 0;
-    struct fat_buffer *pbuf;
+    uint32 scanned = 0;
+    uint32 run;
+    uint32 i;
+    uint32 off;
 
-    for (i = 0; i < fs->fat_sectors && entries < entry_limit; i++)
+    if (!buf || !buf_sectors || !fs->disk_io.read_media)
+        return 0;
+
+    while (scanned < fs->fat_sectors && entries < entry_limit)
     {
-        // Read FAT sector into buffer
-        pbuf = fatfs_fat_read_sector(fs, fs->fat_begin_lba + i);
-        if (!pbuf)
+        // Read a whole run of the FAT in one go
+        run = fs->fat_sectors - scanned;
+        if (run > buf_sectors)
+            run = buf_sectors;
+
+        if (!fs->disk_io.read_media(fs->fat_begin_lba + scanned, buf, run))
             break;
 
-        for (j = 0; j < FAT_SECTOR_SIZE && entries < entry_limit; )
+        for (i = 0; i < run && entries < entry_limit; i++)
         {
-            if (fs->fat_type == FAT_TYPE_16)
+            for (off = 0; off < FAT_SECTOR_SIZE && entries < entry_limit; )
             {
-                if (FAT16_GET_16BIT_WORD(pbuf, (uint16)j) == 0)
-                    count++;
+                if (fs->fat_type == FAT_TYPE_16)
+                {
+                    if (GET_16BIT_WORD(buf, (i * FAT_SECTOR_SIZE) + off) == 0)
+                        count++;
 
-                j += 2;
+                    off += 2;
+                }
+                else
+                {
+                    if (GET_32BIT_WORD(buf, (i * FAT_SECTOR_SIZE) + off) == 0)
+                        count++;
+
+                    off += 4;
+                }
+
+                entries++;
             }
-            else
-            {
-                if (FAT32_GET_32BIT_WORD(pbuf, (uint16)j) == 0)
-                    count++;
-
-                j += 4;
-            }
-
-            entries++;
         }
+
+        scanned += run;
     }
 
     return count;

@@ -15,6 +15,7 @@ int     fatfs_find_blank_cluster(struct fatfs *fs, uint32 start_cluster, uint32 
 int     fatfs_fat_set_cluster(struct fatfs *fs, uint32 cluster, uint32 next_cluster);
 int     fatfs_fat_add_cluster_to_chain(struct fatfs *fs, uint32 start_cluster, uint32 newEntry);
 int     fatfs_free_cluster_chain(struct fatfs *fs, uint32 start_cluster);
-uint32  fatfs_count_free_clusters(struct fatfs *fs, uint32 entry_limit);
+uint32  fatfs_count_free_clusters(struct fatfs *fs, uint32 entry_limit,
+                                  uint8 *buf, uint32 buf_sectors);
 
 #endif

@@ -22,6 +22,7 @@
 /* Embedded Xinu, Copyright (C) 2009.  All rights reserved. */
 
 #include <interrupt.h>
+#include <kernel.h>
 #include <memory.h>
 #include <stddef.h>
 #include <string.h>
@@ -32,6 +33,23 @@ void *psmaxheap;            /* End address of the PSRAM heap */
 
 extern unsigned char _psram_free_start[];
 extern unsigned char _psram_free_end[];
+
+/**
+ * @ingroup memory_mgmt
+ *
+ * Aviso de corruptela.  Los caminos de error de Xinu son silenciosos porque
+ * free() no devuelve nada: aqui eso se pago con un "psram_malloc da NULL con
+ * 31 MB libres" sin ninguna pista (la causa era la cabecera de la lista y el
+ * propio psramlist viviendo en la RAM fantasma de la L2MEM).  Cada rechazo se
+ * imprime con las direcciones implicadas, y los recorridos de la lista van
+ * cota arriba para que una lista pisada no congele la hebra que la consulta.
+ */
+#define PSRAM_WALK_MAX   512U
+
+static void psramBad(const char *what, uintptr_t a, uintptr_t b)
+{
+    kprintf("[psram] %s: %08x %08x\r\n", what, (uint)a, (uint)b);
+}
 
 /**
  * @ingroup memory_mgmt
@@ -187,10 +205,17 @@ uintptr_t psram_free_bytes(void)
 {
     struct memblock *memptr;
     uintptr_t free_mem = 0;
+    uint n = 0;
 
     for (memptr = psramlist.next; memptr != NULL; memptr = memptr->next)
     {
         free_mem += memptr->length;
+        if (++n > PSRAM_WALK_MAX)
+        {
+            psramBad("lista con mas de 512 nodos, corte en",
+                     (uintptr_t)memptr, free_mem);
+            break;
+        }
     }
     return free_mem;
 }
@@ -215,6 +240,13 @@ void *psram_malloc(uintptr_t nbytes)
     pmem = (struct memblock *)psram_getmem(nbytes);
     if (SYSERR == (intptr_t)pmem)
     {
+        /* Pedir menos de lo que hay libre y no conseguir bloque solo pasa si la
+         * lista esta pisada: es el caso que antes se tragaba en silencio. */
+        if (nbytes <= psram_free_bytes())
+        {
+            psramBad("sin bloque habiendo libres", nbytes,
+                     (uintptr_t)psramlist.next);
+        }
         return NULL;
     }
 
@@ -246,10 +278,16 @@ void psram_free(void *pmem)
     /* Don't free if we fail the basic checks */
     if (block->next != block)
     {
+        psramBad("cabecera no reconocida (doble free o pisada)",
+                 (uintptr_t)block, (uintptr_t)block->next);
         return;
     }
 
-    psram_freemem((void *)block, block->length);
+    if (OK != psram_freemem((void *)block, block->length))
+    {
+        psramBad("freemem rechazado (solape o fuera del heap)",
+                 (uintptr_t)block, (uintptr_t)block->length);
+    }
 }
 
 /**

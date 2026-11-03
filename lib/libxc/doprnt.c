@@ -83,8 +83,7 @@ enum integer_size {
  * @return
  *      number of characters written on success, or @c EOF on failure
  */
-int _doprnt(const char *fmt, va_list ap,
-            int (*putc_func) (int, uintptr_t), uintptr_t putc_arg)
+int _doprnt(const char *fmt, va_list ap,int (*putc_func) (int, uintptr_t), uintptr_t putc_arg)
 {
     int chars_written = 0;      /* Number of characters written so far  */
 

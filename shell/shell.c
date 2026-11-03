@@ -42,6 +42,7 @@ const struct centry commandtab[] = {
     {"touchpanel", FALSE, xsh_touchpanel},
     {"power", FALSE, xsh_power},
     {"audio", FALSE, xsh_audio},
+    {"wifi", FALSE, xsh_wifi},
     {"sd", FALSE, xsh_sd},
     {"pwd", FALSE, xsh_pwd},
     {"cd", FALSE, xsh_cd},
@@ -60,6 +61,7 @@ const struct centry commandtab[] = {
     {"hexdump", FALSE, xsh_hexdump},
     {"touch", FALSE, xsh_touch},
     {"test", FALSE, xsh_test},
+    {"elfapp", FALSE, xsh_elfapp},
 };
 ulong ncommand = sizeof(commandtab) / sizeof(struct centry);
 

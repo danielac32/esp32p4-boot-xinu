@@ -57,9 +57,11 @@
 /* Clock plan                                                          */
 /* ------------------------------------------------------------------ */
 /* The SDMMC block runs from the SDIO PLL at 160 MHz.  ONE global divider
- * (HP_SYS_CLKRST.peri_clk_ctrl02) feeds both slots, so it is programmed
- * once at controller init and never touched again; the per-slot CLKDIV
- * register is what changes a card's speed.
+ * (HP_SYS_CLKRST.peri_clk_ctrl02) feeds the block, so it is programmed once at
+ * controller init and never touched again.  Inside the block CLKDIV holds FOUR
+ * independent dividers (one byte each) and CLKSRC binds each slot to one of
+ * them; this driver gives each slot its own: slot 0 -> divider 0, slot 1 ->
+ * divider 1 (same convention as sdmmc_ll_set_card_clock_div in the SDK).
  *
  *   f_sdio_ls = 160 MHz / SD_HOST_DIV          = 40 MHz, both slots
  *   f_card    = f_sdio_ls / (card_div ? 2 * card_div : 1)
@@ -185,8 +187,23 @@
 #define SD_CMD_USE_HOLD            (1U << 29)
 #define SD_CMD_START               (1U << 31)
 
-/* STATUS */
+/* STATUS (sdhost_status_reg_t del SDK, hw_ver3): no es el mapa DesignWare
+ * clasico, son campos propios.  Decodificados en placa durante W2: el valor
+ * 0x0001a306 que queda clavado cuando el update-clock se enquista significa
+ * fifo_tx_watermark=1, fifo_empty=1, fsm=0 (reposo), data_3_status=1 (hay
+ * tarjeta), data_busy=1 (DAT0 a nivel bajo, mantenido por el esclavo) y
+ * response_index=52.  */
+#define SD_STATUS_FIFO_EMPTY       (1U << 2)     /* FIFO sin datos           */
+#define SD_STATUS_FIFO_FULL        (1U << 3)     /* FIFO llena               */
+#define SD_STATUS_FSM_MASK         (0xFU << 4)   /* [7:4] maquina de comando */
+#define SD_STATUS_FSM_POS          4
+#define SD_STATUS_CARD_PRESENT     (1U << 8)     /* DAT3 al to = hay tarjeta */
 #define SD_STATUS_DATA_BUSY        (1U << 9)     /* DAT0 still driven low  */
+#define SD_STATUS_DAT_PATH_BUSY    (1U << 10)    /* FSM de datos ocupada     */
+#define SD_STATUS_RESP_IDX_MASK    (0x3FU << 11) /* [16:11] idx ultimo resp  */
+#define SD_STATUS_RESP_IDX_POS     11
+#define SD_STATUS_FIFO_COUNT_MASK  (0x1FFFU << 17) /* [29:17] palabras FIFO  */
+#define SD_STATUS_FIFO_COUNT_POS   17
 
 /* RINTSTS bits, same order as INTMASK */
 #define SD_IRQ_CD                  (1U << 0)
@@ -328,6 +345,13 @@
 /* ------------------------------------------------------------------ */
 extern uint32_t sd_hwerr;           /* why the last transaction failed */
 extern uint32_t sd_clk_khz;         /* card clock in kHz               */
+extern uint32_t sd_host_khz;        /* reloj global del bloque, en kHz  */
+extern uint32_t sd_clkdbg;          /* sdSetClockSlot failure: (paso<<24)|
+                                     * (motivo<<20)|reintentos, 0 si OK     */
+extern uint32_t sd_clkdbg_reg;      /* RINTSTS capturado en ese fallo       */
+extern uint32_t sd_clkdbg_cmd;      /* SDHOST_CMD capturado en ese fallo    */
+extern uint32_t sd_clkdbg_status;   /* SDHOST_STATUS (inhibit) en el fallo  */
+extern uint32_t sd_clkdbg_clkena;   /* SDHOST_CLKENA en el fallo            */
 extern uint32_t sd_host_lba;        /* cursor for the SDMMC0 device    */
 extern uint8_t sd_host_width;       /* data lines driven (1 or 4)      */
 extern bool sd_host_ready;          /* controller initialised          */
@@ -382,8 +406,69 @@ void sdPadsWiden(void);
 bool sdSetWidth(uint width);
 
 bool sdControllerInit(void);
+
+/**
+ * Forzar el reset de protocolo del bloque (CTRL: controller + FIFO + DMA) y
+ * esperar a que los tres bits se auto-limpien.  Es la UNICA cosa que saca
+ * reposada la maquina de estados de datos cuando una fase de datos muere a
+ * medias (CMD53 sin respuesta del esclavo): con STATUS.data_state_mc_busy en 1
+ * el "update clock" queda inhibido para los DOS slots, asi que ni la microSD
+ * puede cambiar de reloj.  sdControllerInit no lo hace si los bits de CTRL
+ * vienen bajados, que es justo como los deja un fallo.
+ */
+bool sdBlockReset(void);
+
+/**
+ * Fijar el divisor GLOBAL sdio_ls (1..16) del que salen los dos slots: 4 deja
+ * 40 MHz (lo que usa la microSD) y 7 deja 22,857 MHz (lo que usa el driver de
+ * referencia del C6 con card_div=0).  Actualiza sd_host_khz, que es la base de
+ * la que informa sdSetClockSlot().  Devuelve FALSE si \p div se sale del rango
+ * de los campos de 4 bits.
+ */
+bool sdSetHostDiv(uint32_t div);
+
 bool sdSetClock(uint8_t card_div);
 bool sdSendCmd(uint idx, uint32_t arg, uint resp, bool crc, uint32_t *r0);
+
+/* Slot-parameterised entry points (the microSD driver uses slot 0; the ESP32-C6
+ * SDIO probe uses slot 1).  sdSetClock()/sdSendCmd() above are thin wrappers
+ * that pick SD_SLOT, so their behaviour on slot 0 is unchanged. */
+bool sdSetClockSlot(uint32_t slot, uint8_t card_div);
+
+/**
+ * Cambiar el divisor del slot SIN bajar su reloj: escribe CLKDIV/CLKSRC con
+ * CLKENA mantenido y lanza el unico update-clock.  La via normal
+ * (sdSetClockSlot) detiene el reloj antes del update, y si el esclavo tiene
+ * DAT0 afirmado (data_busy=1) el comando interno queda inhibido con el reloj
+ * ya parado: el busy no se muestrea y CMD_START no se auto-limpia nunca.
+ */
+bool sdSetClockSlotLive(uint32_t slot, uint8_t card_div);
+/**
+ * Cambiar el divisor del slot SIN bajar su reloj y SIN esperar el "complete" de
+ * la transferencia anterior (CMD[13]=0).  Con un slave esp_hosted que mantiene
+ * DAT0 abajo, la secuencia clasica se enqista: sdSetClockSlot apaga CLKENA y
+ * luego lanza el update con wait_complete, el busy deja de muestrearse porque
+ * el reloj esta parado, CMD_START no se auto-limpia y todo comando posterior
+ * del slot falla.  Medido en placa en W2: data_busy=1 desde el CMD5 y la
+ * subida de reloj clavada con STATUS=0x0001a306.
+ */
+bool sdSetClockSlotNoWait(uint32_t slot, uint8_t card_div);
+bool sdSendCmdSlot(uint32_t slot, uint idx, uint32_t arg, uint resp, bool crc,
+                   bool send_init, uint32_t *r0);
+
+/**
+ * Volcar descifrado el STATUS del bloque (fifo/fsm/data_busy) y el DIVISOR Y LA
+ * FUENTE por-slot realmente enlazados.  Las sondas SDIO lo llaman paso a paso
+ * porque el dato que decide el orden de una secuencia es data_busy: el esclavo
+ * esp_hosted afirma DAT0 mientras tiene un paquete C2H sin leer o una
+ * interrupcion pendiente, y con DAT0 abajo el comando interno "update clock"
+ * queda inhibido.
+ */
+void sdBusState(const char *tag, uint32_t slot);
+
+/** The SDHOST block register base as a word-indexable pointer (for the
+ *  per-slot fields the command engine does not parameterise). */
+volatile uint32_t *sdHostRegBase(void);
 
 /**
  * One CMD17 block transfer through the bounce page.  The caller must hold
@@ -400,5 +485,16 @@ void sdBlockCopyOut(void *dst, uint bytes);
 
 /** Copy \p bytes into the block the next write will send. */
 void sdBlockCopyIn(const void *src, uint bytes);
+
+/**
+ * Fase de datos de un comando SDIO (CMD53) sobre \p slot, por el mismo IDMA y
+ * la misma rebote de 512 bytes que sdReadBlock/sdWriteBlock, pero con comando,
+ * argumento, tamano de bloque y numero de bytes puestos por el llamante.  No
+ * interpreta la respuesta como R1 (SDIO es R5/R6) ni hace la transformacion
+ * LBA.  bytcnt <= 512.  El llamante sostiene el candado del bus y prepara la
+ * rebote (sdBlockCopyIn antes de un write, sdBlockCopyOut despues de un read).
+ */
+bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
+                    uint32_t blksiz, bool write);
 
 #endif                          /* _SDHOST_H_ */

@@ -1,0 +1,24 @@
+# This Makefile contains rules to build files in the
+# device/sdio-esp32p4/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/sdio-esp32p4
+
+# Source files for this component.  W1: el sondeo de enumeracion SDIO del
+# ESP32-C6 en el slot 1 del controlador SDMMC compartido.  W2: el transporte
+# esp_hosted, copiado VERBATIM del proyecto baremetal de referencia
+# (/home/daniel/esp32-riscv-bare-metal-sdk-main/drivers/esp_hosted):
+#   espHostedSdio.c  <- drivers/esp_hosted/esp_hosted_sdio.c (motor SDIO slot 1)
+#   espHosted.c      <- drivers/esp_hosted/esp_hosted.c      (cola RX + despacho)
+#   sdmmcPeriph.c    <- core/soc/esp32p4/sdmmc_periph.c      (tablas de pad/seno)
+# sdioFn1.c fue el intento propio de W2; queda como diagnostico, ya no es el
+# camino de datos.  Nada de aqui es aun un device del devtab: reutiliza el
+# motor de comandos del host en device/sdmmc-esp32p4 y el candado compartido
+# del bus (system/sdmmcbus.c), porque el slot 0 (microSD/FAT) es el mismo
+# bloque DesignWare.
+C_FILES = sdioProbe.c sdioFn1.c espHostedSdio.c espHosted.c sdmmcPeriph.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

@@ -138,6 +138,7 @@ shellcmd xsh_wget(int, char *[]);
 shellcmd xsh_curl(int, char *[]);
 shellcmd xsh_telnetd(int, char *[]);
 shellcmd xsh_test(int, char *[]);
+shellcmd xsh_elfapp(int, char *[]);
 /* Configuration commands (JSON documents in /config on the FAT volume) */
 
 #endif                          /* _SHELL_H_ */

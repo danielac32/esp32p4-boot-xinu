@@ -29,6 +29,33 @@ MEMORY
     LP_SRAM(rwx)  : ORIGIN = 0x50108000, LENGTH = 32K
 }
 
+/* Peripherals reached through the SDK's struct-mapped headers, copied verbatim
+ * from esp32-riscv-bare-metal-sdk-main into include/soc.  Those headers declare
+ * each block as an object ("extern sdmmc_dev_t SDMMC;") and the SDK resolves
+ * them exactly this way in core/soc/esp32p4/ld/esp32p4.peripherals.ld.  Same
+ * addresses, same trick: PROVIDE binds the symbol to the base of the block, so
+ * &SDMMC is that base and the headers compile unchanged. */
+PROVIDE ( SDMMC             = 0x50083000 );
+PROVIDE ( CACHE             = 0x3FF10000 );
+PROVIDE ( HP_SYS_CLKRST     = 0x500E6000 );
+PROVIDE ( LP_AON_CLKRST     = 0x50111000 );
+PROVIDE ( PMU               = 0x50115000 );
+PROVIDE ( GPIO              = 0x500E0000 );
+PROVIDE ( IO_MUX            = 0x500E1000 );
+PROVIDE ( HP_SYSTEM         = 0x500E5000 );
+PROVIDE ( LP_SYS            = 0x50110000 );
+PROVIDE ( LP_IOMUX          = 0x5012B000 );
+PROVIDE ( USB_SERIAL_JTAG   = 0x500D2000 );
+PROVIDE ( USB_WRAP          = 0x50080000 );
+
+/* The two ROM pad-router helpers the esp_hosted driver calls.  The SDK binds
+ * these names to the boot ROM (core/esp_rom/esp32p4/ld/esp32p4.rom.api.ld:
+ * "PROVIDE ( esp_rom_gpio_connect_out_signal = gpio_matrix_out )").  Same
+ * binding, but pointed at Xinu's own implementation in device/gpio: it does
+ * the identical GPIO-matrix writes and is what W1 proved on this board. */
+PROVIDE ( esp_rom_gpio_connect_out_signal = gpio_matrix_out );
+PROVIDE ( esp_rom_gpio_connect_in_signal  = gpio_matrix_in  );
+
 SECTIONS
 {
     /* ---- flash (XiP) ------------------------------------------------ */
@@ -130,18 +157,23 @@ SECTIONS
 
     /* ---- internal L2MEM --------------------------------------------- */
 
-    /* First page of L2MEM left unused.  The CPU reads this SRAM through the
-     * same L2 cache that caches the PSRAM, and the cache line holding
-     * 0x4FF00000 is lost when external-memory traffic thrashes that cache:
-     * the boot PSRAM probe (or any big PSRAM sweep) zeroes the first 128
-     * bytes of L2MEM.  With .data starting here that silently cleared
-     * fs_cwd[] and the shell's pwd/cd.  Keeping kernel data out of the
-     * page costs 4 KB and makes the two independent (see psramInit.c,
-     * which also probes PSRAM through the uncached 0x88... alias). */
+    /* Primer trozo de la ventana L2MEM, reservado y nunca usado: ahi NO hay
+     * celdas de RAM.  Medido en placa (2026-11-02, barrido de durabilidad cada
+     * 8 KB entre 0x4FF00040 y 0x4FF20040): por debajo de 0x4FF20000 una
+     * escritura con cache que se desaloja no vuelve (la lectura da 0) y el alias
+     * 0x8FF...... tampoco llega a ninguna celda; desde 0x4FF20000 hacia arriba
+     * la misma prueba devuelve el valor escrito por los dos caminos.  El hueco
+     * mide 128 KB, que es el tamano que declara CACHE_L2_CACHE_CACHESIZE_CONF
+     * (0x3FF10278 = 0x200), o sea que ese bloque del array esta consumido por la
+     * propia cache L2.  Lo que el kernel tenga aqui solo vive mientras la linea
+     * este residente: cualquier desalojo lo borra, y asi se pierden las tablas,
+     * el pwd del FAT o el estado de un driver.  Reservar 128 KB en vez de la
+     * pagina de 4 KB que antes bastaba cuesta memoria, pero deja .data, .bss y
+     * el heap de L2MEM encima del corte, en RAM de verdad. */
     .l2reserve (NOLOAD) : ALIGN(4096)
     {
         _l2reserve = .;
-        . = . + 4096;
+        . = . + 0x20000;
     } > HP_L2MEM
 
     /* CLIC hardware vector table (NOLOAD): filled at runtime by the
@@ -206,7 +238,7 @@ SECTIONS
      * top of the heap, so without this the first stack lands on the ROM's
      * data and every ROM call that goes through the table dies. */
     _l2mem_free_start = _end;
-    _l2mem_free_end   = ORIGIN(HP_L2MEM) + LENGTH(HP_L2MEM) - 64K;
+    _l2mem_free_end   = 0x4FFB0000;
 
     /* PSRAM: free from the end of the shared pages up. */
     _psram_free_start = _sd_block_page + 4096;

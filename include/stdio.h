@@ -47,6 +47,12 @@ int sscanf(const char *str, const char *format, ...);
 /* Formatted output  */
 int _doprnt(const char *format, va_list,
 	    int (*putc_func)(int, uintptr_t), uintptr_t putc_arg);
+int snprintf(
+    char *str,       // Buffer de salida
+    int size,     // Tamaño máximo del buffer
+    char *fmt, // Cadena de formato
+    ...              // Argumentos variables
+);
 
 int fprintf(int dev, const char *format, ...) __printf_format(2, 3);
 int printf(const char *format, ...) __printf_format(1, 2);

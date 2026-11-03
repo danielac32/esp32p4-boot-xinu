@@ -9,9 +9,17 @@
 #include <stdio.h>
 #include <string.h>
 #include <kernel.h>
+#include <clock.h>
+#include <memory.h>
 #include <fsutil.h>
 #include <fat_table.h>
 #include <sdblock.h>
+
+/* Sectores de FAT leidos por pasada.  El limite lo pone la memoria: 128
+ * sectores son 64 KB de bufer, y es lo que se paga de PSRAM mientras dura el
+ * escaneo.  Con 8 KB por pasada el escaneo ya baja de 27 s a pocos segundos;
+ * con mas, el ahorro es de bloqueos de bus, no de busqueda. */
+#define DF_SCAN_RUN 128U
 
 /* Print @p kib in a human-friendly unit (GiB/MiB/KiB). */
 static void df_human(unsigned long kib)
@@ -48,6 +56,8 @@ shellcmd xsh_df(int nargs, char *args[])
     ulong total_kib;
     ulong free_sectors;
     ulong free_kib;
+    ulong t0;
+    uint8 *scanBuf;
     bool human = FALSE;
     int i;
 
@@ -98,10 +108,25 @@ shellcmd xsh_df(int nargs, char *args[])
     printf("Volume : FAT32 on microSD (SDMMC slot 0)\n");
     printf("Cluster: %lu byte(s)\n", spc * 512UL);
 
-    /* One sector read per FAT sector (FAT_BUFFER_SECTORS is 1): on this
-     * 58 GiB card that is ~15k reads, so the scan is not instant. */
-    printf("Scanning: the FAT, one sector at a time ...\n");
-    free_clusters = fatfs_count_free_clusters(fs, total_clusters + 2);
+    /* La copia entera de la FAT de esta tarjeta son ~15k sectores.  Se leen
+     * en rafagas de DF_SCAN_RUN, con un SEEK y un bloqueo por rafaga: el
+     * recuento es el mismo sector a sector, solo que en segundos.  El bufer
+     * vive en PSRAM mientras dura el escaneo y se devuelve antes de informar,
+     * para que `mem -p` no vea restos de un df. */
+    scanBuf = (uint8 *)psram_malloc(DF_SCAN_RUN * FAT_SECTOR_SIZE);
+    if (NULL == scanBuf)
+    {
+        fprintf(stderr, "%s: sin hueco de %u bytes en PSRAM\n", args[0],
+                (unsigned)(DF_SCAN_RUN * FAT_SECTOR_SIZE));
+        return SYSERR;
+    }
+
+    printf("Scanning: la FAT, %u sectores por lectura ... ", DF_SCAN_RUN);
+    t0 = clktime;
+    free_clusters = fatfs_count_free_clusters(fs, total_clusters + 2, scanBuf,
+                                              DF_SCAN_RUN);
+    printf("%lu s\n", (unsigned long)(clktime - t0));
+    psram_free(scanBuf);
 
     free_sectors = (ulong)free_clusters * spc;
 

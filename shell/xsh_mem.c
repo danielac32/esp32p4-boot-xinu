@@ -14,7 +14,104 @@
 #include <memory.h>
 #include <platform.h>
 
-static void mem_report(const char *name, struct memblock *head, ulong total);
+static void memWalk(const char *tag, struct memblock *head, ulong lo, ulong hi,
+                    bool dump, ulong *freeOut, ulong *blocksOut,
+                    ulong *largestOut);
+static void memRow(const char *name, struct memblock *head, ulong lo, ulong hi,
+                   bool dump);
+
+/**
+ * Recorrido con cota y comprobaciones de una lista de bloques libres.
+ *
+ * Xinu recorre estas listas a ciegas: si un nodo se pisa (la direccion de
+ * `next` deja de ser un bloque del heap), el bucle se va fuera del heap o da
+ * vueltas y la hebra que pregunta se cuelga sin decir nada.  Aqui cada nodo se
+ * valida antes de usarlo: dentro del heap, alineado a memblock, con longitud
+ * multiple de 8 y mayor que la cabecera, sin pasarse del final y sin solapar al
+ * siguiente.  Ademas se contrasta la cuenta que lleva la propia cabecera
+ * (head->length) contra la suma real de los nodos: si no cuadran, el contador
+ * del heap esta roto aunque la lista se vea bien.
+ *
+ * Imprime en stderr la anomalia detectada y corta el recorrido; con `dump`
+ * tambien vuelca cada bloque (lo que hace 'mem -l').
+ */
+#define MEM_WALK_MAX 512U
+
+static void memWalk(const char *tag, struct memblock *head, ulong lo,
+                    ulong hi, bool dump, ulong *freeOut, ulong *blocksOut,
+                    ulong *largestOut)
+{
+    struct memblock *m;
+    ulong n = 0;
+    ulong prevEnd = 0;
+
+    *freeOut = 0;
+    *blocksOut = 0;
+    *largestOut = 0;
+
+    for (m = head->next; m != NULL; m = m->next)
+    {
+        if (++n > MEM_WALK_MAX)
+        {
+            fprintf(stderr,
+                    "%s: lista con mas de %u nodos, corte en 0x%08lX\n",
+                    tag, MEM_WALK_MAX, (ulong)m);
+            return;
+        }
+        if ((ulong)m < lo || (ulong)m >= hi)
+        {
+            fprintf(stderr,
+                    "%s: nodo %lu fuera del heap: 0x%08lX (%08lX..%08lX)\n",
+                    tag, (unsigned long)n, (ulong)m, lo, hi);
+            return;
+        }
+        if (0 != ((ulong)m & MEMORY_DMBDEC)
+            || m->length < sizeof(struct memblock)
+            || 0 != ((ulong)m->length & MEMORY_DMBDEC))
+        {
+            fprintf(stderr, "%s: nodo %lu desalineado o corto: 0x%08lX len=%lu\n",
+                    tag, (unsigned long)n, (ulong)m,
+                    (unsigned long)m->length);
+            return;
+        }
+        if ((ulong)m + m->length > hi)
+        {
+            fprintf(stderr,
+                    "%s: nodo %lu en 0x%08lX len=%lu se pasa del fin %08lX\n",
+                    tag, (unsigned long)n, (ulong)m,
+                    (unsigned long)m->length, hi);
+            return;
+        }
+        if (0 != prevEnd && (ulong)m < prevEnd)
+        {
+            fprintf(stderr, "%s: SOLAPE: nodo %lu en 0x%08lX, el anterior "
+                    "termina en 0x%08lX\n", tag, (unsigned long)n, (ulong)m,
+                    prevEnd);
+            return;
+        }
+
+        if (dump)
+        {
+            printf("  0x%08lX  %lu bytes\n", (ulong)m,
+                   (unsigned long)m->length);
+        }
+
+        *freeOut += m->length;
+        (*blocksOut)++;
+        if (m->length > *largestOut)
+        {
+            *largestOut = m->length;
+        }
+        prevEnd = (ulong)m + m->length;
+    }
+
+    if (head->length != *freeOut)
+    {
+        fprintf(stderr, "%s: descuadre: la cabecera apunta %lu libres y la "
+                "lista suma %lu\n", tag, (unsigned long)head->length,
+                (unsigned long)*freeOut);
+    }
+}
 
 /**
  * @ingroup shell
@@ -30,7 +127,6 @@ shellcmd xsh_mem(int nargs, char *args[])
     bool heap = TRUE;
     bool psram = TRUE;
     int i;
-    ulong l2total, pstotal;
 
     if (nargs == 2 && strcmp(args[1], "--help") == 0)
     {
@@ -70,11 +166,8 @@ shellcmd xsh_mem(int nargs, char *args[])
         }
     }
 
-    /* Total sizes: L2MEM heap lives in [memheap, platform.maxaddr); PSRAM in
-     * [psminheap, psmaxheap). */
-    l2total = (ulong)platform.maxaddr - (ulong)memheap;
-    pstotal = (psmaxheap != NULL) ? (ulong)psmaxheap - (ulong)psminheap : 0;
-
+    /* Totales: el heap de L2MEM vive en [memheap, platform.maxaddr) y el de
+     * PSRAM en [psminheap, psmaxheap); memRow los deduce de esos extremos. */
     printf("%-6s %10s %10s %10s %8s %8s\n",
            "HEAP", "TOTAL", "FREE", "USED", "BLOCKS", "LARGEST");
     printf("%-6s %10s %10s %10s %8s %8s\n",
@@ -83,61 +176,42 @@ shellcmd xsh_mem(int nargs, char *args[])
 
     if (heap)
     {
-        mem_report("L2MEM", &memlist, l2total);
+        memRow("L2MEM", &memlist, (ulong)memheap,
+               (ulong)platform.maxaddr, list);
     }
     if (psram)
     {
-        mem_report("PSRAM", &psramlist, pstotal);
-    }
-
-    if (list)
-    {
-        struct memblock *m;
-
-        if (heap)
-        {
-            printf("\nL2MEM free list:\n");
-            for (m = memlist.next; m != NULL; m = m->next)
-            {
-                printf("  0x%08lX  %lu bytes\n",
-                       (ulong)m, (unsigned long)m->length);
-            }
-        }
-        if (psram)
-        {
-            printf("\nPSRAM free list:\n");
-            for (m = psramlist.next; m != NULL; m = m->next)
-            {
-                printf("  0x%08lX  %lu bytes\n",
-                       (ulong)m, (unsigned long)m->length);
-            }
-        }
+        memRow("PSRAM", &psramlist, (ulong)psminheap, (ulong)psmaxheap, list);
     }
 
     return OK;
 }
 
-/* Print one summary row for the list headed by @p head.  @p name must be at
- * most 6 characters so the columns line up. */
-static void mem_report(const char *name, struct memblock *head, ulong total)
+/* Print one summary row for the list headed by @p head, then (con dump) el
+ * vuelco de sus bloques.  El total del heap es hi-lo, que es como lo calculaba
+ * la version original: L2MEM en [memheap, platform.maxaddr) y PSRAM en
+ * [psminheap, psmaxheap). */
+static void memRow(const char *name, struct memblock *head, ulong lo, ulong hi,
+                   bool dump)
 {
-    struct memblock *m;
-    ulong free_bytes = 0;
-    ulong blocks = 0;
-    ulong largest = 0;
+    ulong freeBytes, blocks, largest;
 
-    for (m = head->next; m != NULL; m = m->next)
+    if (0 == lo || 0 == hi || hi <= lo)
     {
-        free_bytes += m->length;
-        blocks++;
-        if (m->length > largest)
-        {
-            largest = m->length;
-        }
+        printf("%-6s %10lu %10lu %10lu %8lu %8lu  sin inicializar\n",
+               name, 0UL, 0UL, 0UL, 0UL, 0UL);
+        return;
     }
 
+    memWalk(name, head, lo, hi, FALSE, &freeBytes, &blocks, &largest);
     printf("%-6s %10lu %10lu %10lu %8lu %8lu\n",
-           name, (unsigned long)total, (unsigned long)free_bytes,
-           (unsigned long)(total - free_bytes), (unsigned long)blocks,
+           name, (unsigned long)(hi - lo), (unsigned long)freeBytes,
+           (unsigned long)(hi - lo - freeBytes), (unsigned long)blocks,
            (unsigned long)largest);
+
+    if (dump)
+    {
+        printf("%s free list:\n", name);
+        memWalk(name, head, lo, hi, TRUE, &freeBytes, &blocks, &largest);
+    }
 }
