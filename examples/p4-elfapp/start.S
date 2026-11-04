@@ -36,7 +36,8 @@ _start:
 	lw	a0, -12(s0)
 	call	exit                    /* exit(int): lo exporta el cargador      */
 
-	lw	ra, -4(s0)
-	addi	sp, s0, -16
-	ret                             /* vuelve al cargador                     */
+	lw	ra, 12(sp)
+	lw	s0, 8(sp)                 /* se devuelve TAMBIEN s0: 'addi s0, sp,   */
+	addi	sp, sp, 16              /*   16' de arriba la pisa, y el cargador   */
+	ret                             /*   lee s0 al volver (medido en placa).   */
 	.size	_start, . - _start

@@ -357,6 +357,17 @@ extern uint8_t sd_host_width;       /* data lines driven (1 or 4)      */
 extern bool sd_host_ready;          /* controller initialised          */
 extern bool sd_host_hc;             /* card addressed by block number  */
 
+/**
+ * Traza de la fase de datos (diagnostico del CMD53 del slot 1).  Apagada por
+ * defecto; la enciende el comando `wifi dma`.  Mientras esta a 1, sdTransferSlot
+ * vuelca en cada punto de la secuencia los registros del motor, el descriptor,
+ * el R5 del comando y el nivel de las patas del slot 1, todo leido del
+ * periferico.  sd_xfer_r5 guarda RESP0..RESP3 del ultimo CMD_DONE.
+ */
+extern uint32_t sd_xfer_trace;
+extern uint32_t sd_xfer_r5[4];
+extern uint32_t sd_xfer_no_wait;
+
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
 /* ------------------------------------------------------------------ */
@@ -496,5 +507,19 @@ void sdBlockCopyIn(const void *src, uint bytes);
  */
 bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
                     uint32_t blksiz, bool write);
+
+/**
+ * Fase de datos del mismo CMD53 pero en MODO PIO: el IDMAC apagada (CTRL[5] y
+ * CTRL[25] a 0, BMOD e IDINTEN a 0), sin descriptor ni DBADDR, y con el CPU
+ * sacando/metiendo palabras de 32 bits por BUFFIFO (0x200).  Sirve para separar
+ * "el esclavo no condujo ningun bit" (sd_pio_words=0) de "el dato llego al
+ * bloque y el IDMAC no lo sacaba" (sd_pio_words>0).  Escribe/lee \p buf
+ * directamente; no usa la rebote del slot 0.  bytcnt <= 512.
+ */
+bool sdTransferPio(uint32_t slot, uint idx, uint32_t arg, uint8_t *buf,
+                   uint32_t bytcnt, uint32_t blksiz, bool write);
+
+extern uint32_t sd_pio_words;         /* palabras servidas por el ultimo PIO */
+extern uint32_t sd_pio_bytes;         /* bytes correspondientes               */
 
 #endif                          /* _SDHOST_H_ */

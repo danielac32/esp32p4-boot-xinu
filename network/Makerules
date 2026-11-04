@@ -1,0 +1,4 @@
+COMP = network
+NETWORKING = arp dhcpc icmp ipv4 net netaddr route
+DIR = ${TOPDIR}/${COMP}
+include ${NETWORKING:%=${DIR}/%/Makerules}

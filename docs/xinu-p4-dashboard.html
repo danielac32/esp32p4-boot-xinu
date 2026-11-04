@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Xinu · ESP32-P4 — tablero del port</title>
+<style>
+:root{
+  --primary:#4f6df5; --primary-dk:#2f49c4; --primary-lt:#e8ecfe;
+  --surface:#f7f7fb; --card:#ffffff; --on-surface:#1b1c1e; --muted:#5c616c;
+  --outline:#d5d7e0; --ok:#1b8a4c; --ok-bg:#e4f5ea; --warn:#b06500; --warn-bg:#fdf0dd;
+  --fail:#c5221f; --fail-bg:#fbe9e7; --info:#0b6b8c; --info-bg:#e2f2f8;
+  --e1:0 1px 2px rgba(0,0,0,.10),0 1px 3px 1px rgba(0,0,0,.06);
+  --e2:0 2px 6px 2px rgba(0,0,0,.10),0 1px 2px rgba(0,0,0,.12);
+  --mono:"DejaVu Sans Mono","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--surface);color:var(--on-surface);
+  font:15px/1.55 system-ui,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;}
+code,.mono{font-family:var(--mono)}
+/* ---------- barra superior ---------- */
+.appbar{background:var(--primary-dk);color:#fff;padding:14px 20px 12px;
+  box-shadow:var(--e2);position:sticky;top:0;z-index:20}
+.appbar h1{margin:0;font-size:19px;font-weight:500;letter-spacing:.2px}
+.appbar p{margin:2px 0 8px;font-size:12.5px;opacity:.82}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border-radius:14px;padding:2px 10px;font-size:11.5px;font-weight:600;
+  background:rgba(255,255,255,.16);color:#fff;border:1px solid rgba(255,255,255,.3)}
+.chip.g{background:#1b8a4c;border-color:#1b8a4c}
+.chip.a{background:#b06500;border-color:#b06500}
+.chip.r{background:#c5221f;border-color:#c5221f}
+/* ---------- pestañas ---------- */
+.tabs{display:flex;gap:2px;overflow-x:auto;background:#fff;border-bottom:1px solid var(--outline);
+  position:sticky;top:76px;z-index:19;padding:0 12px}
+.tabs button{all:unset;cursor:pointer;white-space:nowrap;padding:12px 15px 10px;font-size:13.5px;
+  font-weight:600;color:var(--muted);border-bottom:3px solid transparent}
+.tabs button:hover{background:var(--primary-lt);color:var(--primary-dk)}
+.tabs button[aria-selected="true"]{color:var(--primary-dk);border-bottom-color:var(--primary)}
+main{padding:18px 20px 60px;max-width:1180px;margin:0 auto}
+section[hidden]{display:none}
+/* ---------- tarjetas ---------- */
+.card{background:var(--card);border-radius:12px;box-shadow:var(--e1);padding:16px 18px;margin:0 0 16px}
+.card h2{margin:0 0 4px;font-size:17px;font-weight:500}
+.card h3{margin:16px 0 6px;font-size:14px;font-weight:600;color:var(--primary-dk);
+  text-transform:uppercase;letter-spacing:.5px}
+.card p{margin:6px 0;color:var(--on-surface)}
+.sub{color:var(--muted);font-size:12.5px;margin:0 0 12px}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.metric{background:var(--primary-lt);border-radius:10px;padding:11px 13px}
+.metric b{display:block;font-size:22px;font-weight:600;color:var(--primary-dk);letter-spacing:-.3px}
+.metric span{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+/* ---------- tablas ---------- */
+table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}
+th{text-align:left;font-weight:600;color:var(--muted);border-bottom:2px solid var(--outline);
+  padding:7px 8px;font-size:11.5px;text-transform:uppercase;letter-spacing:.4px}
+td{padding:7px 8px;border-bottom:1px solid #edeff4;vertical-align:top}
+tr:hover td{background:#fafbff}
+/* ---------- estado ---------- */
+.st{display:inline-block;border-radius:4px;padding:1px 7px;font-size:11px;font-weight:700}
+.st.ok{color:var(--ok);background:var(--ok-bg)}
+.st.av{color:var(--warn);background:var(--warn-bg)}
+.st.fa{color:var(--fail);background:var(--fail-bg)}
+.st.no{color:var(--muted);background:#eef0f4}
+/* ---------- código ---------- */
+pre{background:#15171c;color:#e6e9f0;border-radius:9px;padding:12px 14px;overflow-x:auto;
+  font-size:12px;line-height:1.45;margin:8px 0}
+pre .c{color:#8b93a6}
+code{background:#eef0f4;border-radius:4px;padding:1px 5px;font-size:12.5px}
+ul{margin:6px 0 6px 18px;padding:0}
+li{margin:3px 0}
+.note{border-left:4px solid var(--primary);background:var(--primary-lt);
+  border-radius:0 8px 8px 0;padding:10px 13px;margin:10px 0;font-size:13px}
+.warn{border-left-color:var(--warn);background:var(--warn-bg)}
+.danger{border-left-color:var(--fail);background:var(--fail-bg)}
+/* ---------- mapa de memoria ---------- */
+.mmap{display:grid;grid-template-columns:132px 1fr 150px;gap:0 12px;font-size:12px;align-items:stretch}
+.mmap .addr{font-family:var(--mono);color:var(--muted);text-align:right;white-space:nowrap}
+.mmap .blk{border-radius:6px;margin:3px 0;padding:7px 11px;font-weight:600;color:#fff;font-size:12.5px}
+.mmap .lbl{color:var(--muted);font-weight:400;padding:7px 0;margin:3px 0;font-size:11.5px}
+.b-flash{background:#5b6ee1}.b-kern{background:#3f4fa8}.b-free{background:#c3cae9;color:#2f49c4}
+.b-ulp{background:#7e57c2}.b-sbl{background:#00897b}
+.b-ps{background:#ef8c3c}.b-aud{background:#c96a1b}.b-heap{background:#f3b26f;color:#4a2c07}
+.b-l2{background:#455a64}.b-bss{background:#607d8b}.b-ghost{background:repeating-linear-gradient(
+  45deg,#b0bec5,#b0bec5 7px,#eceff1 7px,#eceff1 14px);color:#37474f}
+.b-rom{background:#90a4ae;color:#263238}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:11.5px;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+/* ---------- checklist syscheck ---------- */
+label.ck{display:flex;gap:9px;align-items:flex-start;padding:6px 8px;border-radius:7px;cursor:pointer}
+label.ck:hover{background:var(--primary-lt)}
+label.ck input{margin-top:4px}
+footer{padding:22px;color:var(--muted);font-size:12px;max-width:1180px;margin:0 auto}
+</style>
+</head>
+<body>
+
+<header class="appbar">
+  <h1>Xinu · ESP32-P4</h1>
+  <p>Tablero del port bare-metal — Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 · RV32 dual-core HP + core LP · 16 MB flash XIP · 32 MB PSRAM · ESP32-C6 por SDIO</p>
+  <div class="chips">
+    <span class="chip g">WiFi + DHCP operativo</span>
+    <span class="chip g">audio TX/RX validado al oído</span>
+    <span class="chip g">SD + FAT</span>
+    <span class="chip a">latencia en reposo 81 ms · #61</span>
+    <span class="chip g">telnet tras corte recuperado · #62</span>
+    <span class="chip">core1 aparcado</span>
+    <span class="chip">ULP vacío</span>
+    <span class="chip r">cámara / USB device / MP3 / Java: no existe</span>
+  </div>
+</header>
+
+<div class="tabs" role="tablist">
+  <button role="tab" aria-selected="true" data-t="resumen">Resumen</button>
+  <button role="tab" aria-selected="false" data-t="memoria">Memoria</button>
+  <button role="tab" aria-selected="false" data-t="nucleos">Núcleos</button>
+  <button role="tab" aria-selected="false" data-t="dispositivos">Dispositivos</button>
+  <button role="tab" aria-selected="false" data-t="red">Red y WiFi</button>
+  <button role="tab" aria-selected="false" data-t="apps">ELF · Java · apps</button>
+  <button role="tab" aria-selected="false" data-t="syscheck">syscheck</button>
+  <button role="tab" aria-selected="false" data-t="recursos">conf.c</button>
+  <button role="tab" aria-selected="false" data-t="roadmap">Roadmap</button>
+</div>
+
+<main>
+
+<!-- ============================ RESUMEN ============================ -->
+<section id="resumen" role="tabpanel">
+  <div class="card">
+    <h2>Qué es este kernel</h2>
+    <p class="sub">Escrito el 2026-11-04 contra el árbol de trabajo. Cada cifra viene del enlace actual
+      (<code>riscv64-unknown-elf-size -A compile/xinu.elf</code>, <code>nm</code>) o de una medición en placa.
+      Documentación extensa en <code>docs/port-esp32p4/</code> (00 índice, 01 memoria, 02 dispositivos,
+      03 red, 04 ELF/Java, 05 roadmap, 06 syscheck).</p>
+    <div class="grid g3">
+      <div class="metric"><b>291.372 B</b><span>kernel XIP en flash</span></div>
+      <div class="metric"><b>459.312 B</b><span>heap L2MEM (RAM rápida)</span></div>
+      <div class="metric"><b>33.329.152 B</b><span>span heap PSRAM</span></div>
+      <div class="metric"><b>24</b><span>buffers del pool de red</span></div>
+      <div class="metric"><b>319,977 MHz</b><span>velocidad REAL del core (el port declara 360)</span></div>
+      <div class="metric"><b>1,26 s</b><span>lo que dura de verdad 1 s del kernel (<code>syscheck clk</code>)</span></div>
+      <div class="metric"><b>192.000 B/s</b><span>PCM teórico (medido 193.547)</span></div>
+      <div class="metric"><b>3</b><span>núcleos: core0 vivo · core1 wfi · ULP vacío</span></div>
+    </div>
+    <div class="note warn"><b>El reloj del port está mal declarado, y ya está medido</b> (2026-11-04):
+      <code>platform.clkfreq = P4_TIMER_FREQ = 360000000</code> es un <b>−11,1 %</b> sobre los
+      320,010 MHz reales del <code>mtime</code> (medidos contra el PC), y el core va 1:1 con él
+      (<code>mcycle/mtime</code> = 0,9999).  Además <code>clkhandler()</code> rearma el comparator
+      con ~0,134 ms de coste por tick, así que <b>un segundo del kernel dura 1,26 s</b>.
+      Todo lo que derive de <code>clkfreq</code> —<code>sleep()</code>, <code>udelay()</code>,
+      <code>micros()</code> y los timeouts de la pila— está hinchado esa proporción.
+      Corregido <b>no</b>: mover <code>clkfreq</code> reescribe los tiempos de una red ya validada.
+      Detalle en la pestaña <b>syscheck</b> y en
+      <code>docs/port-esp32p4/06-syscheck.md</code>; la propuesta en <code>05-roadmap-y-conf.md §1.0</code>.</div>
+  </div>
+
+  <div class="card">
+    <h2>Cadena de arranque</h2>
+    <pre>BootROM  ──lee cabecera──▶  <span class="c">flash 0x2000:</span> SBL ──copia a HP_TCM──▶ <span class="c">0x30100000</span>
+   │                            ├─ psram_init() + mmu.c   ▶ habilita 0x40000000
+   │                            ├─ suelta core0 y core1   ▶ <span class="c">0x40005000 (kernel XIP)</span>
+   │                            └─ ulp_boot()             ▶ ULP_ENTRY_POINT_REG 0x50110028
+   │                                        core LP XIP en <span class="c">0x40100000</span>
+   └── reset_handler lee mhartid y <span class="c">aparca al que no es 0</span> (start.S:92)</pre>
+    <table>
+      <tr><th>paso</th><th>hecho</th><th>prueba</th></tr>
+      <tr><td>1</td><td>El BootROM carga el SBL desde el offset <code>0x2000</code> en HP_TCM (8 KB). Un binario crudo sin cabecera se rechaza con <em>invalid magic number</em>.</td><td><span class="st ok">verificado</span></td></tr>
+      <tr><td>2</td><td>El SBL inicializa PSRAM y MMU y suelta <b>los dos harts en el mismo sitio</b>: <code>__kernel_entry_point = 0x40005000</code>.</td><td><span class="st ok">verificado</span></td></tr>
+      <tr><td>3</td><td><code>reset_handler</code> aparca al hart≠0. Core1 queda en <code>wfi</code> con pila, <code>mtvec</code> y testigo.</td><td><span class="st ok">testigo 0xC0DE1234 en 0x4FF3F5D0</span></td></tr>
+      <tr><td>4</td><td><code>ulp_boot()</code> escribe la entrada del LP core y lo levanta por software.</td><td><span class="st av">levanta, main() vacío</span></td></tr>
+      <tr><td>5</td><td>El kernel corre <b>XIP</b> desde flash: no hay copia de <code>.text</code> a RAM. Eso limita qué se puede reprogramar en caliente.</td><td><span class="st no">condiciona el OTA</span></td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Las tres trampas del chip que ya están domadas</h2>
+    <table>
+      <tr><th>trampa</th><th>qué hace</th><th>cómo se convive</th></tr>
+      <tr><td><b>Banda fantasma</b><br><code>0x4FF00000…0x4FF1FFFF</code></td>
+          <td>No hay celdas ahí: se escribe y al desalojar la línea L2 se lee basura. Root-cause del «phantom 128 KB».</td>
+          <td><code>.l2reserve</code> la reserva entera; <code>.data</code>/<code>.bss</code>/heap empiezan en <code>0x4FF20000</code>.</td></tr>
+      <tr><td><b>Alias de caché de PSRAM</b></td>
+          <td><code>0x48…</code> es con caché y <code>0x88…</code> es <b>la misma celda</b> sin caché (sumar <code>0x40000000</code>). Mezclar ventanas dentro de un bloque corrompe — y no es <code>memcpy</code> el culpable.</td>
+          <td>Un buffer, una ventana. El CPU toca PSRAM por <code>0x88…</code>; los descriptores del DMA anotan <code>0x48…</code>.</td></tr>
+      <tr><td><b>L2MEM no tiene alias sin caché</b></td>
+          <td>El truco <code>+0x40000000</code> no aplica a la RAM rápida: el alias <code>0x8F…</code> no existe.</td>
+          <td>Los buffers que consume un DMA van a <code>.NOLOAD</code> de PSRAM, no a L2MEM.</td></tr>
+    </table>
+    <div class="note">El número <code>0x40000000</code> <b>no es una dirección</b>: es el offset del alias, y por
+      casualidad coincide con el principio de la ventana XIP de flash. De ahí la confusión de «sumarle 0x400…».
+      <code>0x48… + 0x40… = 0x88…</code> sigue dentro del espacio del CPU.</div>
+  </div>
+</section>
+
+<!-- ============================ MEMORIA ============================ -->
+<section id="memoria" role="tabpanel" hidden>
+  <div class="card">
+    <h2>Mapa de memoria actual</h2>
+    <p class="sub">Cifras sin redondear del enlazado de hoy. Los <code>ORIGIN/LENGTH</code> de
+      <code>ld.script</code> <b>no son físicos</b>: declaran <code>FLASH 31M</code> y <code>RAM 31M</code> sobre
+      un chip de 16 MB de flash y 32 MB de PSRAM.</p>
+
+    <h3>Flash — ventana XIP 0x40000000 · 16 MB físicos</h3>
+    <div class="mmap">
+      <div class="addr">0x40002000</div><div class="blk b-sbl" style="flex:1">SBL — 4.304 B</div><div class="lbl">termina en 0x400030D0</div>
+      <div class="addr">0x400030D0</div><div class="blk b-free">hueco de enlace · 8 KB</div><div class="lbl">hasta 0x40005000</div>
+      <div class="addr">0x40005000</div><div class="blk b-kern" style="padding:14px 11px">KERNEL — 291.372 B<br><span style="font-weight:400;font-size:11px">.init 186 · .text 214.576 · .rodata 76.092 · .ctors 4</span></div><div class="lbl">fin de imagen en 0x4004C22C</div>
+      <div class="addr">0x4004C22C</div><div class="blk b-free" style="padding:20px 11px">LIBRE · ~720 KB</div><div class="lbl">usable: stage OTA, .class, html</div>
+      <div class="addr">0x40100000</div><div class="blk b-ulp">ULP — 724 B</div><div class="lbl">= offset de flash 0x100000</div>
+      <div class="addr">0x401002D4</div><div class="blk b-free" style="padding:26px 11px">LIBRE · ~14,99 MB</div><div class="lbl">sin tabla de particiones: nada lo protege</div>
+    </div>
+
+    <h3>PSRAM — 32 MB · base con caché 0x48000000 (alias sin caché = +0x40000000 → 0x88…)</h3>
+    <div class="mmap">
+      <div class="addr">0x48000000</div><div class="blk b-aud">.audioshare — 151.552 B</div><div class="lbl">anillos PCM TX/RX (NOLOAD)</div>
+      <div class="addr">0x48025000</div><div class="blk b-ps" style="padding:6px 11px">.sdshare — 8.192 B</div><div class="lbl">página de bloqueo del FAT</div>
+      <div class="addr">0x48027000</div><div class="blk b-heap" style="padding:26px 11px">heap PSRAM — 33.329.152 B<br><span style="font-weight:400;font-size:11px">lo que reparte psram_malloc()</span></div><div class="lbl">0x48027000 … 0x49F00000</div>
+      <div class="addr">0x49F00000</div><div class="blk b-ulp">RAM del núcleo LP — 1 MB</div><div class="lbl">la que reclama ulp.ld</div>
+    </div>
+
+    <h3>L2MEM — 768 KB declarados · RAM rápida real del core</h3>
+    <div class="mmap">
+      <div class="addr">0x4FF00000</div><div class="blk b-ghost" style="padding:16px 11px">.l2reserve — 131.072 B · BANDA FANTASMA: no hay celdas</div><div class="lbl">reservada por el enlazado</div>
+      <div class="addr">0x4FF20000</div><div class="blk b-l2" style="padding:5px 11px">.vectors / .data — 492 B</div><div class="lbl"></div>
+      <div class="addr">0x4FF20200</div><div class="blk b-bss">.bss — 127.952 B</div><div class="lbl">tablas del kernel</div>
+      <div class="addr">0x4FF3F5D0</div><div class="blk b-l2" style="padding:5px 11px">.core1stk — 2.048 B</div><div class="lbl">pila del hart aparcado</div>
+      <div class="addr">0x4FF3FDD0</div><div class="blk b-heap" style="background:#78909c;color:#fff;padding:22px 11px">heap L2MEM — 459.312 B<br><span style="font-weight:400;font-size:11px">getmem() y pilas de hebra</span></div><div class="lbl">… 0x4FFB0000</div>
+      <div class="addr">0x4FFB0000</div><div class="blk b-rom">ROM de arranque — 64 KB</div><div class="lbl">tabla de despacho 0x4FFBFFD8, pila ROM 0x4FFBCFC0</div>
+    </div>
+
+    <div class="legend">
+      <span><i style="background:#5b6ee1"></i>flash</span>
+      <span><i style="background:#7e57c2"></i>LP core</span>
+      <span><i style="background:#c3cae9"></i>libre en flash</span>
+      <span><i style="background:#ef8c3c"></i>PSRAM</span>
+      <span><i style="background:#455a64"></i>L2MEM</span>
+      <span><i style="background:repeating-linear-gradient(45deg,#b0bec5,#b0bec5 4px,#eceff1 4px,#eceff1 8px)"></i>banda sin celdas</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>¿Cuánta RAM disponible hay que contar?</h2>
+    <p class="sub">Pregunta literal del punto 20. La trampa es que «768 KB de RAM» y «32 MB de PSRAM» no son
+      cifras utilizables tal cual.</p>
+    <table>
+      <tr><th>zona</th><th>lo que se declara</th><th>lo que se puede usar</th><th>por qué</th></tr>
+      <tr><td><b>L2MEM</b></td><td>768 KB</td><td><b>576 KB</b> de celdas · <b>448 KB</b> de heap</td><td>−128 KB de banda fantasma, −64 KB de ROM arriba, −130,5 KB de <code>.data</code>/<code>.bss</code>/<code>.core1stk</code></td></tr>
+      <tr><td><b>PSRAM</b></td><td>32 MB</td><td><b>31,8 MB</b></td><td>−1 MB que reclama <code>ulp.ld</code>, −~156 KB de anillos compartidos</td></tr>
+      <tr><td>HP_TCM</td><td>8 KB</td><td>0 B</td><td>la ocupa el SBL; nada del kernel debería ir ahí</td></tr>
+      <tr><td>LP_SRAM</td><td>32 KB</td><td><b>32 KB libres</b></td><td>declarada en <code>ld.script:29</code> y sin usar; es la única RAM viva con el HP dormido</td></tr>
+    </table>
+    <div class="note"><b>Regla práctica:</b> presupuesta <b>~400 KB de RAM rápida</b> y <b>~31 MB de RAM lenta con
+      caché</b>. Pila de hebra, tablas del kernel y buffers de 4-8 KB → L2MEM. PCM, imágenes, WAV, catálogo de
+      apps → PSRAM con <code>psram_malloc()</code>.</div>
+
+    <h3>¿De dónde saca 1 MB de RAM el ULP?</h3>
+    <p>De la <b>PSRAM</b>: <code>0x49F00000 = 0x48000000 + 0x1F00000</code>, el último megabyte de los 32. Lo
+      inicializa el SBL (<code>psram_init()</code> + MMU) <b>antes</b> de soltar el LP core, y queda fuera del heap
+      del kernel por un detalle del enlace: <code>_psram_free_end = ORIGIN(RAM)+LENGTH(RAM)</code> con
+      <code>LENGTH(RAM)=31M</code> → el heap termina <b>justo</b> en <code>0x49F00000</code>. Medido: símbolo
+      <code>B</code> en <code>nm</code>.</p>
+    <div class="note danger">No es una RAM aparte del chip: es PSRAM compartida con una <b>frontera acordada entre
+      dos scripts de enlace</b>. Si alguien sube <code>LENGTH(RAM)</code> a 32M, el heap del kernel se come la RAM
+      del ULP <b>en silencio</b>.</div>
+
+    <h3>Dónde se solapan las cosas (para el bootloader)</h3>
+    <ul>
+      <li><b>No hay tabla de particiones.</b> Se escribe con <code>write-flash</code> a tres direcciones concretas y nada impide que una imagen crezca sobre la vecina.</li>
+      <li>El kernel puede crecer hasta <code>0x100000 − 0x5000 = 1.023.984 B</code> antes de pisar el ULP.</li>
+      <li>El ULP tiene 1 MB de hueco hasta el final del primer megabyte de flash.</li>
+      <li>El hueco contiguo libre más grande es <b>~14,99 MB</b> detrás del ULP: ahí va el plano A/B del OTA.</li>
+      <li>El ULP se enlaza en <code>0x40100000</code> porque el offset de flash es <code>0x100000</code>. En el <code>ulp.ld</code> original era 0x8000, y con este kernel de ~291 KB quedaría pisado.</li>
+      <li>Propuesta: bajar <code>FLASH LENGTH</code> de 31M a 16M para que <code>ld</code> corte si el kernel se pasa de los 16 MB físicos. <code>RAM</code> ya cuadra: su 31M reserva exactamente el MB del ULP.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>PSRAM y caché, de una vez por todas</h2>
+    <p class="sub">Punto 9. Medido en placa el 2026-11-02 con <code>examples/psram-blob/</code>.</p>
+    <table>
+      <tr><th>camino</th><th>escribir</th><th>ejecutar</th><th>resultado</th></tr>
+      <tr><td>caché → caché</td><td><code>0x48…</code></td><td><code>0x48…</code></td><td><span class="st fa">falla</span> <code>mepc=0x48027008 mcause=2 mtval=0x20aa</code> (la mitad baja de la celda vieja)</td></tr>
+      <tr><td>sin caché → caché</td><td><code>0x88…</code></td><td><code>0x48…</code></td><td><span class="st fa">falla</span> la línea sucia de L2 tapa lo escrito</td></tr>
+      <tr><td>sin caché → sin caché</td><td><code>0x88…</code></td><td><code>0x88…</code></td><td><span class="st ok">funciona</span> <code>sum(2,3)=5</code>, <code>sum(40,2)=42</code></td></tr>
+    </table>
+    <h3>Las cinco reglas operativas</h3>
+    <ol>
+      <li><b>Un buffer, una ventana.</b> Si el DMA o un blob recién copiado entran por <code>0x88…</code>, todo el mundo entra por <code>0x88…</code>. Mezclar ventanas dentro del mismo bloque es lo que corrompe.</li>
+      <li><code>memcpy</code> <b>no es el culpable</b>: copia por <code>0x48…</code> y deja la línea sucia en L1-D, que el fetch de instrucción lee rancia. La vía con caché exige <code>CACHE.sync_map</code> (bit 0 L1-ICache0, 4 L1-D, 5 L2), <code>sync_addr</code> (dirección <b>virtual</b>), <code>sync_size</code>, <code>sync_ctrl</code> y luego <code>fence.i</code>. Los envoltorios de <code>include/hal/cache_ll.h</code> <b>no enlazan</b> en este árbol: delegan en símbolos de ROM cuya tabla no está portada. Línea de caché ≥ 64 B.</li>
+      <li>Ventana <b>válida para el DMA AHB</b>: <code>0x40000000 … 0x4FFC0000</code>. Un puntero <code>0x88…</code> el DMA <b>no</b> lo acepta: el descriptor anota <code>0x48…</code> y la ventana sin caché es solo para que la CPU pise. Es lo que hace audio.</li>
+      <li>El alias <code>0x8F…</code> de L2MEM <b>no existe</b>. No intentes «hacer lo mismo» con la RAM rápida.</li>
+      <li>No es un problema de permisos: el MMU externo del P4 solo tiene bits de validez y de tipo flash/PSRAM, sin R/X (<code>machine/sbl/mmu.c:28</code>), y este kernel no configura PMP. <b>Un puntero de <code>psram_malloc()</code> es saltable y ejecutable.</b></li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================ NÚCLEOS ============================ -->
+<section id="nucleos" role="tabpanel" hidden>
+  <div class="card">
+    <h2>Los tres núcleos (punto 21)</h2>
+    <p class="sub">Core0 ejecuta Xinu. Core1 está <b>aparcado con orden</b> y no ejecuta nada. El ULP se levanta
+      con <code>main()</code> vacío.</p>
+    <table>
+      <tr><th>recurso</th><th>alcance</th><th>consecuencia</th></tr>
+      <tr><td><code>mtvec</code>, <code>mtvt</code>, <code>mstatus</code>, <code>mepc</code>, <code>mie</code></td><td><b>por hart</b></td><td>core0 no puede configurar las trampas de core1; cada hart programa las suyas al entrar en C</td></tr>
+      <tr><td>CLIC</td><td>por hart <b>con alias</b></td><td><code>P4_CLIC_BASE = 0x20800000</code> es el del hart que ejecuta; <code>+0x10000</code> es el del otro (<code>DUALCORE_CLIC_CTRL_OFF</code>). <code>clic.c</code> solo usa la ventana local</td></tr>
+      <tr><td>matriz ETS→línea</td><td>por hart</td><td><code>INTERRUPT_CORE0_BASE 0x500D6000</code> / <code>CORE1 0x500D6800</code>; <code>enable_irq()</code> escribe solo en la de core0</td></tr>
+      <tr><td><code>mtime</code>/<code>mtimecmp</code></td><td>compartido</td><td>un solo consumidor: Xinu. <b>Core1 no puede usar <code>clkcount()</code> para sus ticks</b></td></tr>
+      <tr><td>periféricos</td><td>compartidos</td><td>dos harts sobre el mismo <code>uarttab</code>/buffer = corrupción. <b>Un periférico por hart</b> sí es seguro</td></tr>
+      <tr><td>L2MEM / PSRAM</td><td>compartidas, <b>caché por core</b></td><td>hay que <code>fence</code> en ambas direcciones; los datos que se pasen deben vivir en la ventana sin caché o respaldarse</td></tr>
+    </table>
+  </div>
+
+  <div class="grid g2">
+    <div class="card">
+      <h2>Core1: modelo realista</h2>
+      <p class="sub">Lo que ya está verificado: hart 1 despierta, se pone su pila (<code>.core1stk</code>, 2 KB),
+        apaga <code>mstatus.MIE</code>, programa su <code>mtvec</code> y entra en <code>wfi</code>, dejando el
+        testigo <code>{0xC0DE1234, 1, sp}</code>.</p>
+      <p>El modelo acotado (README_CORE1 §4): core1 ejecuta <b>una única función sin reentrar en el runtime
+        Xinu</b> — solo MMIO y memoria compartida — encargada por core0 con</p>
+      <pre>struct core1_block {
+    magic, hartid, stack_top, entry, arg,
+    req_seq, ack_seq, done_seq
+};   <span class="c">// en LP_SRAM o PSRAM, con core1_fence()</span></pre>
+      <p><b>Nada</b> de <code>printf</code>, <code>sleep</code> ni <code>getbuf</code>.</p>
+      <h3>Qué tarea darle, en orden de utilidad</h3>
+      <ol>
+        <li><b><code>esp_hosted_poll()</code> + SDIO del C6</b> — es un bucle de sondeo puro, sin llamadas al runtime, y es exactamente lo que hoy roba ciclos del core0 y de la shell. <span class="st ok">candidato 1</span></li>
+        <li><b>El candado del bus SDHOST</b> movedizo: slot 0 (SD) y slot 1 (C6) hoy se serializan con <code>sdmmcBusLock()</code> en un solo hart.</li>
+        <li>Cámaras de colisión de red / descarte de tramas, si el pool se queda corto.</li>
+      </ol>
+    </div>
+
+    <div class="card">
+      <h2>Core LP (ULP)</h2>
+      <p class="sub">RV32IMC <b>sin FPU</b>, XIP en flash offset <code>0x100000</code> (<code>0x40100000</code>),
+        RAM en el último MB de PSRAM. <code>printf</code> resuelto a ROM <code>0x4FC00024</code>.</p>
+      <table>
+        <tr><th>uso propuesto</th><th>por qué encaja</th><th>estado</th></tr>
+        <tr><td>Vigía de batería y <code>PWR_KEY</code> (GPIO49)</td><td>LP_SRAM es la única RAM viva con el HP dormido; el ULP puede leer el PMIC y despertar al core0</td><td><span class="st no">nunca se ha leído PWR_KEY</span></td></tr>
+        <tr><td>Wake por <code>TP_INT</code> del panel táctil</td><td>hoy el touch es <b>polleado</b>; una línea con interrupción real sí puede sacar al HP del sueño</td><td><span class="st no">sin montar</span></td></tr>
+        <tr><td>Contador de watchdog propio</td><td>no depende de <code>mtime</code>, que es compartido</td><td><span class="st no">sin montar</span></td></tr>
+      </table>
+      <div class="note warn">Lo que <b>no</b> puede: coma flotante (no hay FPU), ni tocar ningún periférico que el
+        core0 tenga abierto. El PMIC sigue siendo zona prohibida: escribir 0x10 (RWAC) o 0x80 tumba la placa.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ DISPOSITIVOS ============================ -->
+<section id="dispositivos" role="tabpanel" hidden>
+  <div class="card">
+    <h2>Ranuras de dispositivo</h2>
+    <p class="sub">La fila del devtab la <b>genera</b> <code>compile/config/config</code> desde
+      <code>compile/platforms/esp32p4/xinu.conf</code>. Editar <code>system/conf.c</code> a mano no sirve: lo borra
+      cualquier <code>make</code>.</p>
+    <table>
+      <tr><th>#</th><th>nombre</th><th>driver</th><th>estado</th></tr>
+      <tr><td>0</td><td>SERIAL0</td><td>uart (csr UART0_BASE)</td><td><span class="st ok">consola</span></td></tr>
+      <tr><td>1..2</td><td>DEVNULL · CONSOLE</td><td>null · tty</td><td><span class="st ok">vivo</span></td></tr>
+      <tr><td>3</td><td>PSRAM0</td><td>psram</td><td><span class="st ok">vivo</span></td></tr>
+      <tr><td>4</td><td>LCD0</td><td>lcd (csr SPI2_BASE)</td><td><span class="st av">sin framebuffer</span></td></tr>
+      <tr><td>5..7</td><td>SDMMC0 · SD0 · FAT0</td><td>sdmmc · sdblock · fat</td><td><span class="st ok">60 GB montada</span></td></tr>
+      <tr><td>8..9</td><td>GPIO0 · I2C0</td><td>gpio · i2c</td><td><span class="st ok">monitor de bus activo</span></td></tr>
+      <tr><td>10</td><td>TOUCH0</td><td>touch (FT6336U/GT911)</td><td><span class="st ok">poleado, sin IRQ</span></td></tr>
+      <tr><td>11</td><td>POWER0</td><td>power (AXP2101)</td><td><span class="st av">solo lectura</span></td></tr>
+      <tr><td>12</td><td>AUDIO0</td><td>audio (ES8311 + I2S0 + AHB-DMA)</td><td><span class="st ok">TX y RX</span></td></tr>
+      <tr><td>13</td><td>ETH0</td><td>espeth (sobre esp_hosted/SDIO)</td><td><span class="st ok">vivo</span></td></tr>
+      <tr><td>14..27</td><td>RAW0-1 · UDP0-1 · TCP0-9</td><td>software / NET</td><td><span class="st ok">vivo</span></td></tr>
+      <tr><td>28..31</td><td>TELNET0-3</td><td>telnet on TCP</td><td><span class="st ok">vivo · #62 no se reproduce</span></td></tr>
+      <tr><td>32</td><td>NAMESPACE</td><td>nam</td><td><span class="st ok">resuelve <code>/dev/…</code></span></td></tr>
+    </table>
+  </div>
+
+  <div class="grid g2">
+    <div class="card">
+      <h2>Audio · ES8311 + I2S0 + AHB-DMA</h2>
+      <p class="sub">Cuatro etapas (E1 codec, E2 relojes, E3 salida DMA, E4 device por <code>read()</code>/<code>write()</code>), las cuatro validadas en placa.</p>
+      <table>
+        <tr><th>qué</th><th>valor</th></tr>
+        <tr><td>formato</td><td>48 kHz · 16 bits · 2 slots = <b>192.000 B/s</b></td></tr>
+        <tr><td>quirk</td><td>mono: hay que duplicar la muestra en el slot; sin eso el <code>loop</code> sonaba mudo</td></tr>
+        <tr><td>MCLK</td><td>12,288 MHz desde 40 MHz con división fraccionaria <b>exacta</b> (N=3, z=49, x=2, y=45) — el APLL no hace falta</td></tr>
+        <tr><td>relojes</td><td>no hay registros de reloj en el bloque I2S: están en <code>HP_SYS_CLKRST.peri_clk_ctrl13/14</code> y la salida MCLK por pad en <code>LP_AON_CLKRST</code></td></tr>
+        <tr><td>salida</td><td>el I2S <b>no tiene FIFO visible para la CPU</b>: lo vacía el AHB-DMA (canal TX 0, <code>peri_out_sel = 3</code>)</td></tr>
+        <tr><td>lista de descriptores</td><td>cíclica (<code>suc_eof=0</code>, el último apunta al primero, dueño cedido al motor): sin rearme y <b>sin interrupciones</b></td></tr>
+        <tr><td>anti-pop</td><td>patrón → descriptores → relojes → enlace → quitar silencio → <b>por último</b> AMP_POWER (GPIO53, NS4150B activo por alto). Al parar, inverso.</td></tr>
+        <tr><td>tono sin costura</td><td><code>base = 48000/mcd(hz,48000)</code>, múltiplo más largo que quepa. Peor desvío en 50…8000 Hz: 12 Hz</td></tr>
+        <tr><td>ganancia de captura</td><td>registro 0x16 (escala digital del ADC) <b>no lo escribía nadie</b>: el codec no sigue el reset del P4. Ahora <code>ES_MIC_SCALE</code> = 6 (+36 dB), y <code>audio gain N</code> lo cambia en caliente</td></tr>
+      </table>
+      <h3>Medido en placa</h3>
+      <table>
+        <tr><th>magnitud</th><th>teórico</th><th>medido</th><th>desvío</th></tr>
+        <tr><td>sincronismo I2S (reg. 0x74, muestras de 16 bits)</td><td>96.000/s</td><td><b>95.551/s</b></td><td>−0,47 %</td></tr>
+        <tr><td>captura de micro por <code>read()</code></td><td>192.000 B/s</td><td><b>193.547 B/s</b></td><td>+0,80 %</td></tr>
+        <tr><td><code>rec 15000</code></td><td>720.000 frames</td><td>720.000, sin <code>dscr_err</code></td><td>—</td></tr>
+        <tr><td>cuatro tomas del mismo tono</td><td>—</td><td>24 / 25 / 22 / 23 %</td><td>estable</td></tr>
+      </table>
+      <div class="note">El camino de datos usa <b>solo</b> el acceso directo <code>0x88…</code>. Mover PCM por la vía
+        con caché (<code>0x48…</code>) deja líneas de L2MEM leídas a cero: se manifestaba como
+        <code>irq with null vector: irq=31</code> con <code>interruptVector[9..47]</code> a cero a partir del borde
+        de una línea de 64 bytes, y como un cuelgue mudo.</div>
+    </div>
+
+    <div class="card">
+      <h2>Power · AXP2101 (solo lectura)</h2>
+      <p class="sub">Dispositivo deliberadamente de <b>una dirección</b>: solo <code>control()</code> de lectura.</p>
+      <table>
+        <tr><th>registro</th><th>riesgo</th></tr>
+        <tr><td><code>0x10</code> RWAC</td><td><span class="st fa">apaga la placa</span></td></tr>
+        <tr><td><code>0x80</code> / <code>0x90</code> / <code>0x91</code></td><td><span class="st fa">puertas de salida: tumba la placa</span></td></tr>
+      </table>
+      <p>Medido: <b>batería 100 %, tensión ≈4140 mV</b>. La celda es real, no un valor fijo devuelto por el driver.</p>
+      <p><code>PWR_KEY</code> es GPIO49 y <b>nunca se ha leído</b>: es el hueco natural del ULP como vigía.</p>
+
+      <h2 style="margin-top:22px">LCD · ST7796 320×480 por SPI2</h2>
+      <p class="sub">La librería actual pinta por primitivas y está bien; <b>no hay framebuffer</b>. Para LVGL hace falta una capa de 3 piezas:</p>
+      <ol>
+        <li><b>Zona de píxeles</b>: sección <code>.lcdshare</code> en PSRAM (320×480×2 = 307.200 B, holgadamente en los 31,8 MB) y un <code>lcd_fb_flush()</code> que la vuelque por SPI2 con el DMA.</li>
+        <li><b>Opcode</b> <code>LCD_CTRL_FLUSH</code> en el device, más el control de LVGL <code>LVGL_CTRL_TICK</code> que ya está definido (<code>include/lvgl.h:20</code>) y avanza desde <code>millis()</code>.</li>
+        <li><b>Encaje de LVGL</b>: <code>disp_flush</code> → <code>lcd_fb_flush()</code>; <code>indev_read</code> → <code>read(TOUCH0)</code>. Ojo con el punto flotante de LVGL (regla del kernel: sin coma flotante) y con que <code>lv_conf.h</code> use <code>LV_COLOR_DEPTH 16</code>.</li>
+      </ol>
+      <div class="note warn">Riesgos apuntados: LVGL trae coma flotante; y el acelerador de pantalla del P4
+        (<code>LCD_CAM</code>, <code>DMA2D</code>, <code>PPA</code>) tiene HAL en el SDK bare-metal
+        (<code>mipi_csi_*_ll.h</code>, <code>isp_ll.h</code>, <code>dma2d_ll.h</code>, <code>ppa_ll.h</code>) pero
+        <b>no está portado</b>. Empezar sin aceleración.</div>
+
+      <h2 style="margin-top:22px">Touch y SD/FAT</h2>
+      <p>FT6336U a 0x38, <b>poleado</b> (sin IRQ: <code>TP_INT</code> no está cableado al CLIC). SD de 60 GB en FAT32
+        en el slot 0 del SDHOST. Slot 0 (SD) y slot 1 (C6) comparten controlador y se serializan con
+        <code>sdmmcBusLock()</code>, un monitor reentrante (dueño + profundidad). Ese candado es el que hace que
+        <code>df</code> y un <code>httpd</code> concurrente se pisen: está documentado en la receta del segundo servidor.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ RED ============================ -->
+<section id="red" role="tabpanel" hidden>
+  <div class="card">
+    <h2>Pila de red</h2>
+    <p class="sub">Pila nativa Xinu portada (no lwIP), sobre <code>espeth</code>, que es una <b>interfaz</b>: las
+      tramas las mueve esp_hosted por SDIO con el C6.</p>
+    <pre><span class="c">apps de shell / servidores</span>   telnet · httpd · ping · dns · netstat …
+        <span class="c">▼</span>
+   <span class="c">tcp</span> (10 PCB)  <span class="c">udp</span> (2)  <span class="c">raw</span> (2)        <span class="c">icmp</span>
+        <span class="c">▼</span>
+   <span class="c">ip</span>  ◀── <span class="c">arp</span> (32)  <span class="c">route</span> (32)  <span class="c">dhcpc</span>
+        <span class="c">▼</span>
+   <span class="c">netif</span> (NET_NTHR=1 hebra netRecv)  <span class="c">pool bfp</span> (24 × 1616 B)
+        <span class="c">▼</span>
+   <span class="c">espeth</span> ETH0  ◀── anillo de 8 tramas de 1600 B
+        <span class="c">▼</span>
+   <span class="c">esp_hosted</span> RPC sobre SDIO slot 1  ──▶  <span class="c">ESP32-C6</span></pre>
+    <h3>espeth — «no está en conf.c y no sé qué es» (punto 4)</h3>
+    <p><b>Sí está</b>: <code>system/conf.c:133-138</code> es la fila del devtab
+      <code>{ 13, 0, "ETH0", … }</code>, y se genera desde
+      <code>compile/platforms/esp32p4/xinu.conf:102-105, 189, 274</code>. No es Ethernet físico: es el
+      <b>netif</b> que presenta el WiFi del C6 como si fuera una interfaz de red, para que la pila TCP/UDP de Xinu
+      no tenga que saber nada del SDIO.</p>
+    <table>
+      <tr><th>control</th><th>nº</th><th>qué hace</th></tr>
+      <tr><td><code>ESPETH_CTRL_LINK</code></td><td>260</td><td>estado del enlace</td></tr>
+      <tr><td><code>ESPETH_CTRL_MAC_SET</code></td><td>261</td><td>fija la MAC</td></tr>
+      <tr><td><code>ESPETH_CTRL_STATS</code></td><td>262</td><td><code>struct espeth_stats</code>: rx_frames, rx_drops, tx_frames, tx_drops</td></tr>
+    </table>
+    <p><code>ESPETH_RX_SLOTS = 8</code>, <code>ESPETH_FRAME_MAX = 1600</code>.</p>
+  </div>
+
+  <div class="card">
+    <h2>Comandos de red: lo que hay y lo que falta</h2>
+    <table>
+      <tr><th>comando</th><th>estado</th><th>nota</th></tr>
+      <tr><td><code>netboot</code></td><td><span class="st ok">registrado</span></td><td>levanta WiFi + DHCP + servidores en un paso → IP de DHCP: <code>172.16.0.117</code> en la AP del trabajo (<code>PhMNet_2</code>), <code>192.168.1.146</code> en la de casa. Credenciales en <code>shell/xsh_netboot.c:55</code></td></tr>
+      <tr><td><code>ping</code> · <code>dns</code> · <code>netstat</code> · <code>ifconfig</code> · <code>arp</code> · <code>msys</code></td><td><span class="st ok">registrado</span></td><td>portados de xinu-s3-amp</td></tr>
+      <tr><td><code>tcp</code> · <code>udpecho</code> · <code>httpd</code> · <code>telnet</code>/<code>telnetd</code></td><td><span class="st ok">registrado</span></td><td><code>httpd</code> es mínimo: un <code>index</code> embebido, <b>no lee FAT</b></td></tr>
+      <tr><td><code>curl</code> · <code>wget</code> · <code>ip</code></td><td><span class="st av">existe el .c, sin fila en commandtab</span></td><td>registrarlos es 1 línea cada uno (doc 05 §1.6)</td></tr>
+      <tr><td><code>nc</code> · <code>udpserver</code> · <code>httpapi</code></td><td><span class="st no">no portados</span></td><td>#56 (udpserver) y #57 (httpd completo)</td></tr>
+    </table>
+    <h3>Levantar la red a mano</h3>
+    <pre>wifi up              <span class="c">// esp_hosted attach por SDIO (slot 1)</span>
+wifi connect         <span class="c">// ssid/pass en la constante de la función</span>
+wifi scan            <span class="c">// lista de redes con RSSI (RPC 257)</span>
+ifconfig ETH0        <span class="c">// estado del netif</span>
+dhcpc ETH0           <span class="c">// o `netboot`, que hace todo lo anterior</span>
+ping 192.168.1.1</pre>
+    <h3>Patrón C de un servidor</h3>
+    <pre>dev = getdev("TCP0");
+tcpInit(); tcpRegister(dev);
+tid = tcpAlloc(port, REMOTEPORT, 1, TCPSM_NONE, NULL, NULL, dev);
+tcpAllocPassive(tid);
+open(dev, TCP_PASSIVE);
+tcpOpen(dev);                       <span class="c">// escucha</span>
+control(dev, TCP_CTRL_RCVTIMEO, ms, 0);   <span class="c">// sin esto: bloqueo eterno</span></pre>
+    <div class="note"><code>tcpAlloc()</code> + <code>tcpAllocPassive()</code> antes de <code>open()</code>: así se
+      evita que el PCB quede en manos del temporizador con un estado a medias. <code>TCP_CTRL_RCVTIMEO</code> es lo
+      que permite cerrar un servidor sin hebra releaser.</div>
+  </div>
+
+  <div class="card">
+    <h2>Otro servidor HTML en otro puerto — la receta (punto 3)</h2>
+    <p class="sub">Copiar <code>shell/xsh_httpd.c</code> y cambiar cuatro cosas no basta. Las cinco condiciones que
+      lo hacen funcionar de verdad:</p>
+    <table>
+      <tr><th>#</th><th>condición</th><th>por qué</th></tr>
+      <tr><td>1</td><td><b>No</b> reutilizar la variable global <code>httpdRunning</code> ni el nombre <code>"httpd"</code> en el releaser</td><td>los dos servidores se apagarían el uno al otro por el flag compartido</td></tr>
+      <tr><td>2</td><td>Hebra <b>releaser</b> propia (<code>tcpReleaseListen</code>)</td><td>el PCB de escucha no se libera solo al cerrar; sin ella el puerto queda tomado</td></tr>
+      <tr><td>3</td><td><code>TCP_CTRL_RCVTIMEO</code> en el socket aceptado</td><td>sin timeout, un cliente que no habla bloquea al servidor para siempre</td></tr>
+      <tr><td>4</td><td>Leer con <code>readline()</code>, no con <code>read()</code> a pelo</td><td>HTTP/1.1 termina las cabeceras en <code>\r\n\r\n</code>; un <code>read()</code> devuelve media petición</td></tr>
+      <tr><td>5</td><td>Presupuestar el coste de <code>sdmmcBusLock()</code> si sirve ficheros de la SD</td><td>slot 0 y slot 1 comparten controlador: cada lectura de FAT serializa al C6 y sube la latencia del WiFi</td></tr>
+    </table>
+    <div class="note warn">Hoy <b>no se puede</b> servir un dashboard desde la SD por <code>httpd</code>: el httpd del
+      port no lee FAT, sirve un <code>index</code> embebido en <code>.rodata</code>. Ver la pestaña Roadmap, punto 19.</div>
+  </div>
+
+  <div class="card">
+    <h2>esp_hosted / WiFi (punto 5)</h2>
+    <p class="sub">El C6 habla por SDIO en el slot 1 con un protocolo de RPC. Id de petición → respuesta en
+      <code>id + 256</code>.</p>
+    <table>
+      <tr><th>RPC id</th><th>para qué</th></tr>
+      <tr><td>257</td><td>scan / RSSI</td><td></td></tr>
+      <tr><td>260 · 278 · 280</td><td>estado de enlace, config de estación</td><td></td></tr>
+      <tr><td>282 · 283 · 284</td><td>conectar / desconectar / red guardada</td><td></td></tr>
+      <tr><td>350 · 387</td><td>config de punto de acceso, eth</td><td></td></tr>
+      <tr><td>769 · 775 · 776</td><td>eventos (estado de estación, scan,config)</td><td></td></tr>
+    </table>
+    <h3>La carrera que se arregló</h3>
+    <p><code>wifi signal</code> y <code>wifi scan</code> solo funcionaban con la pila en reposo:
+      <code>netRecv</code> se comía la respuesta RPC. El arreglo, en tres piezas:</p>
+    <ol>
+      <li><code>disable()/restore()</code> alrededor de la lectura del RPC, para que el despachador no interfiera.</li>
+      <li><code>sdmmcBusLock()</code> — el monitor reentrante del SDHOST compartido con la SD.</li>
+      <li>Anillo de 8 tramas y una entrada <b>raw-RPC</b> en el control layer: <code>esp_hosted_ctrl_raw_request()</code>.</li>
+    </ol>
+    <h3>Lo que NO puede hacer este WiFi</h3>
+    <p>El SDK bare-metal de esp_hosted <b>no expone</b> monitor, sniffer, deauth ni inyección — barrido de ids:
+      0 resultados. Tampoco expone power save del C6, que es lo que deja la latencia en reposo en ~81 ms (#61).</p>
+    <div class="note">Consecuencia directa sobre dos apps del catálogo: <b>«vulnerar redes para aprender»</b> y el
+      <b>mapa de redes</b> estilo kismet no son viables como están. La alternativa formativa sí: barrido ARP/TCP
+      sobre la red propia, que es lo que <code>wifi scan</code> + <code>ping</code> + <code>arp</code> ya permiten.</div>
+  </div>
+</section>
+
+<!-- ============================ APPS ============================ -->
+<section id="apps" role="tabpanel" hidden>
+  <div class="card">
+    <h2>Cargador ELF en vivo (punto 6 y 7)</h2>
+    <p class="sub"><code>elfrun</code> está probado en placa: 235 relocaciones y selftest 26/27. El contrato es
+      estrecho y hay que conocerlo antes de escribir una librería.</p>
+    <table>
+      <tr><th>aspecto</th><th>lo que acepta el cargador</th></tr>
+      <tr><td>tipo</td><td>solo <code>ET_REL</code> · <code>ELFCLASS32</code> · <code>EM_RISCV</code></td></tr>
+      <tr><td>relocaciones</td><td>HI20(26) · LO12_I(27) · 32(1) · CALL(18) · CALL_PLT(19)</td></tr>
+      <tr><td>techos</td><td><code>MAX_SECC 48</code> · <code>MAX_SIMB 192</code> · <code>MAX_EXPORTS 16</code> — y <b>14 están llenas</b></td></tr>
+      <tr><td>compilación</td><td><code>-fno-pic</code> · <code>-mno-relax</code> · <code>ld -r</code> · sin <code>.sdata</code>/<code>.sbss</code></td></tr>
+      <tr><td>embutido</td><td>el ELF se mete como <code>.rodata</code> del kernel</td></tr>
+      <tr><td>lo que <b>no</b> existe</td><td><code>elfload.c</code> como unidad aparte, ni una <code>sysent</code> que despache: <code>sys_call_table</code> está comentada, así que los números de <code>include/syscall.h</code> son <b>inalcanzables</b> desde un .app</td></tr>
+    </table>
+    <h3>Hacer librerías con <code>extern</code>: Modelo A frente a B</h3>
+    <table>
+      <tr><th></th><th>A — tabla de API versionada <span class="st ok">recomendado</span></th><th>B — <code>.so</code> con GOT</th></tr>
+      <tr><td>cómo se enlaza</td><td>el .app declara <code>extern</code> y el cargador rellena la tabla con punteros reales del kernel</td><td>enlazado dinámico con <code>-fPIC</code> y relocation de GOT en tiempo de carga</td></tr>
+      <tr><td>coste</td><td>las 5 relocaciones que ya soporta. Nada nuevo.</td><td>hace falta <code>R_RISCV_GOT_HI20</code>/<code>PC32</code>/<code>CALL_PLT</code> completo y un resolvedor</td></tr>
+      <tr><td>estabilidad</td><td>versionable: se añade al final de la tabla y los .app viejos siguen validando</td><td>ABI real; se rompe con cada reorganización del kernel</td></tr>
+    </table>
+    <p>Exports a añadir (quedan 2 libres de 16): <code>lcd_pixel</code>, <code>lcd_fill</code>, <code>touch_read</code>,
+      <code>audio_write</code>, <code>audio_read</code>, <code>power_percent</code>, <code>psram_malloc</code>,
+      <code>psram_free</code>, <code>tcp_open</code>, <code>fl_fopen</code>. <b>Primero hay que subir
+      <code>MAX_EXPORTS</code></b>.</p>
+    <h3>Desacoplar la shell y cargarla como busybox</h3>
+    <p>Cinco pasos: (1) tabla de API versionada, (2) mover los <code>xsh_*</code> a un <code>.app</code> que enlace
+      contra esa tabla, (3) <code>commandtab</code> poblada en tiempo de carga en vez de en <code>.rodata</code>,
+      (4) residente pequeño en el kernel que haga de dispatcher, (5) aislamiento de fallo (si un app trapea, se
+      descarta y la consola sigue viva).</p>
+    <div class="note warn"><b>Recomendación explícita: no sacar la shell del kernel.</b> Es lo que queda cuando el
+      resto falla; si la shell vive en un blob y el blob se corrompe por la caché de PSRAM, se pierde el único modo
+      de diagnóstico. Busybox sí tiene sentido para <b>las apps</b>, no para el intérprete.</div>
+  </div>
+
+  <div class="card">
+    <h2>Port de la JVM de xinu-s3-amp (punto 10)</h2>
+    <p class="sub">El árbol de origen existe y es un intérprete de bytecode, no un JIT:
+      <code>/home/daniel/xinu-s3-amp/jvm/bytecodes.c</code> (71 KB), pools sin GC, JCL en
+      <code>java_lib.c</code>/<code>java_std.c</code>, <code>xsh_java</code> carga <code>/java/&lt;Class&gt;.class</code>
+      y hay 8 demos en <code>apps/java</code> (incluidas <code>LvglDemo</code> y <code>Menu</code>).</p>
+    <table>
+      <tr><th>etapa</th><th>qué</th><th>riesgo</th></tr>
+      <tr><td>E1</td><td>copiar y compilar el intérprete contra el ABI P4 (RV32, sin coma flotante para la aritmética de VM)</td><td>bajo</td></tr>
+      <tr><td>E2</td><td>rellenar <code>javalib</code> con nuestros periféricos: <code>p4.Lcd</code>, <code>p4.Touch</code>, <code>p4.Audio</code>, <code>p4.Power</code>, <code>p4.Net</code>, <code>p4.Sd</code></td><td>medio — es donde el port aporta valor</td></tr>
+      <tr><td>E3</td><td>las 5 redes de seguridad por falta de GC</td><td><b>alto</b></td></tr>
+      <tr><td>E4</td><td>launcher que gestione las apps <code>.class</code></td><td>medio</td></tr>
+    </table>
+    <h3>Cómo minimizar los errores de no tener GC</h3>
+    <ol>
+      <li><b>Arena bump de 4 MB en PSRAM</b> para objetos Java: sin <code>free()</code> individual, sin fragmentación.</li>
+      <li><b>Límites duros</b>: profundidad de pila de la VM, nº de clases cargadas, bytes de arena.</li>
+      <li><b>Liberar la arena al volver al launcher</b> — el modelo de vida es «una app a la vez».</li>
+      <li><b><code>try/catch</code> mínimo</b> en el despachador, para que un bytecode malo no sea un trap del kernel.</li>
+      <li><b>Apps aisladas</b>: cada una con su arena, y la red 5 es que un fallo de una no deje sin consola a la otra.</li>
+    </ol>
+
+    <h2 style="margin-top:24px">Java o ELF en runtime (punto 12) — los dos, cada uno para lo suyo</h2>
+    <table>
+      <tr><th></th><th>ELF cargado en vivo</th><th>JVM + <code>.class</code></th></tr>
+      <tr><td>arranque</td><td>inmediato</td><td>hay que levantar la VM y cargar clases</td></tr>
+      <tr><td>coste en CPU</td><td>nativo</td><td>intérprete de bytecode: un orden de magnitud más lento</td></tr>
+      <tr><td>memoria</td><td>el blob y sus relocaciones</td><td>VM + arena + pools: MB</td></tr>
+      <tr><td>seguridad de fallo</td><td>un puntero malo = trap del kernel</td><td>la VM intermedia y puede convertirlo en excepción</td></tr>
+      <tr><td>ideal para</td><td>drivers, códecs (MP3, STT), utilidades de red, todo lo que sea ciclos</td><td>la GUI y las apps del launcher, portabilidad, desarrollo sin recompilar el kernel</td></tr>
+    </table>
+    <p><b>Decisión propuesta:</b> GUI y catálogo de apps en Java con el launcher; lo que necesite ancho de banda
+      (MP3, cámara, STT) como <code>.app</code> ELF expuesto a la VM por las clases nativas de E2.</p>
+  </div>
+
+  <div class="card">
+    <h2>Catálogo de apps (punto 11) — viabilidad honesta</h2>
+    <table>
+      <tr><th>app</th><th>viabilidad</th><th>qué falta</th></tr>
+      <tr><td>herramientas de red (servidor, telnet, udp, clientes, ping, escáner)</td><td><span class="st ok">inmediata</span></td><td>registrar <code>curl</code>, <code>wget</code> y <code>ip</code>; #56 <code>udpserver</code></td></tr>
+      <tr><td>notas · gestor de archivos · configuración</td><td><span class="st ok">directa</span></td><td>FAT ya funciona; hace falta el framebuffer para pintar bien</td></tr>
+      <tr><td>convertidores de valores</td><td><span class="st ok">directa</span></td><td>—</td></tr>
+      <tr><td>música (reproductor)</td><td><span class="st av">requiere MP3</span></td><td>portar Helix/MAD en punto fijo (ver Roadmap)</td></tr>
+      <tr><td>juegos (flappy, tetris)</td><td><span class="st av">con framebuffer</span></td><td>LVGL o <code>.lcdshare</code>; el touch ya va</td></tr>
+      <tr><td>escáner de redes / mapa de redes</td><td><span class="st av">limitado</span></td><td>solo ARP/TCP sweep sobre la red propia; sin monitor</td></tr>
+      <tr><td>herramientas de electrónica</td><td><span class="st av">parcial</span></td><td>el P4 <b>sí</b> tiene ADC (<code>SOC_ADC_CHANNEL_NUM(0)=8</code>, <code>(1)=6</code>) y 2 comparadores (<code>SOC_ANA_CMPR_NUM=2</code>) en el SDK, <b>sin portar</b>. Sin DAC ni osciloscopio real.</td></tr>
+      <tr><td>galería de imágenes</td><td><span class="st av">requiere decodificador</span></td><td>PNG sí; JPEG por software o por el acelerador del P4 (<code>jpeg_ll.h</code>, sin portar)</td></tr>
+      <tr><td>escáner QR</td><td><span class="st fa">difícil</span></td><td>necesita cámara y ~100 KB de heap de decoder</td></tr>
+      <tr><td>«mi Google y mis claves guardadas»</td><td><span class="st fa">no</span></td><td>sin TLS en la pila y sin endpoint accesible. Técnico, no de política: <code>https</code> no existe aquí.</td></tr>
+      <tr><td>«vulnerar redes para aprender»</td><td><span class="st fa">no</span></td><td>esp_hosted no expone monitor, inyección ni deauth</td></tr>
+    </table>
+    <div class="note">Alternativa formativa a la última: un <b>barrido ARP/TCP</b> de la red propia con
+      <code>ping</code>/<code>arp</code>/<code>netstat</code>, y una app que dibuje el mapa de vecinos. Enseña lo
+      mismo (descubrimiento, puertos, protocolos) sin necesitar capacidades que el chip no da.</div>
+  </div>
+</section>
+
+<!-- ============================ SYSCHECK ============================ -->
+<section id="syscheck" role="tabpanel" hidden>
+  <div class="card">
+    <h2><code>syscheck</code>: a qué velocidad está el CPU y si <code>millis()</code> funciona</h2>
+    <p class="sub"><b>Cableado y medido en placa el 2026-11-04</b> (autorizado por el dueño):
+      fuente en <code>shell/xsh_syscheck.c</code>, fuera ya de <code>examples/</code>.
+      El <code>mcycle</code> <b>no paniqueó</b>.  Resultado: el core va a <b>~320 MHz</b>,
+      no a 360, y <b>1 s del kernel dura 1,26 s reales</b>.</p>
+    <div class="grid g3">
+      <div class="metric"><b>319,977 MHz</b><span>velocidad real del core (declarado: 360)</span></div>
+      <div class="metric"><b>0,9999</b><span>ratio <code>mcycle/mtime</code>: core y CLINT, mismo reloj</span></div>
+      <div class="metric"><b>320,010 MHz</b><span><code>mtime</code> medido contra el PC</span></div>
+      <div class="metric"><b>402.818</b><span>cuentas de mtime por ms de kernel (programadas: 360.000)</span></div>
+      <div class="metric"><b>1,26 s</b><span>lo que dura de verdad 1 s del kernel (ratio PC 0,78066)</span></div>
+      <div class="metric"><b>5,34</b><span>ciclos/iter del bucle de referencia (200.000 iters = 3.338 µs)</span></div>
+      <div class="metric"><b>23 / 19 / 4 / 0</b><span>tests <code>syscheck all</code>: OK / avisos / fallos</span></div>
+      <div class="metric"><b>monótona</b><span><code>millis()</code>: forma correcta, valor hinchado un 26 %</span></div>
+      <div class="metric"><b>49 días</b><span>rango antes del envoltorio de <code>millis()</code></span></div>
+    </div>
+    <h3>Por qué «360 MHz» no era una medida — y qué salió</h3>
+    <p><code>platform.clkfreq = P4_TIMER_FREQ = 360000000</code>
+      (<code>system/platforms/esp32p4/platforminit.c:39</code>, y el define
+      <code>include/esp32p4.h:160</code> dice literalmente <em>CPU root clock == mtime tick</em>).
+      <b>Medido:</b> la identidad core↔CLINT <b>es cierta</b> (ratio 0,9999), pero el valor
+      <b>no</b>: el reloj común es <b>320,010 MHz</b>, un <b>−11,1 %</b>.  Con cristal de 40 MHz
+      eso es un divisor de 8, no de 9.  Y encima <code>clkhandler()</code> rearma el comparator
+      con <b>~42.800 cuentas de más por tick</b> (0,134 ms), así que el segundo del kernel se va
+      a 1,26 s.  Los dos defectos están documentados y <b>sin corregir</b>: tocar <code>clkfreq</code>
+      reescribe todos los timeouts de la pila validada en la fase 1.</p>
+    <h3>Cómo se midió la velocidad real</h3>
+    <p>Con los CSRs <code>mcycle</code>/<code>mcycleh</code> (<code>0xB00</code>/<code>0xB80</code>), que es como el
+      SDK bare-metal cuenta ciclos del P4
+      (<code>esp32-riscv-bare-metal-sdk-main/core/riscv/include/riscv/rv_utils.h:95</code>):</p>
+      <pre>MHz_del_core = mcycle_delta / (mtime_delta / 1e6)</pre>
+    <table>
+      <tr><th>ratio <code>mcycle/mtime</code></th><th>qué significa</th><th>qué hacer</th></tr>
+      <tr><td>≈ 1,00 <span class="st ok">← salió este</span></td><td>core y CLINT van al mismo reloj. <b>No valida el 360 declarado</b>: solo dice que son el mismo reloj, y hace falta una referencia de fuera para saber a cuánto</td><td>cerrar la cifra con <code>p4clk.py</code> → 320,010 MHz</td></tr>
+      <tr><td>≈ 9</td><td>la CLINT va a 40 MHz y el core a 360: el <code>clkfreq</code> describe el <b>tick</b>, no la velocidad del CPU</td><td>los <code>udelay()</code> están bien; revisar todo presupuesto de ciclos</td></tr>
+      <tr><td>≈ 0,11</td><td>la CLINT va más rápido que el core</td><td>alguien corre el núcleo por debajo de lo supuesto: mirar APLL/XTAL en el SBL</td></tr>
+      <tr><td>trap</td><td>sin <code>mcycle</code> accesible</td><td>no ocurrió: el CSR existe en este P4</td></tr>
+    </table>
+    <div class="note warn"><code>syscheck cpu</code> <b>podía panicar</b> y <b>no paniqueó</b>: el
+      <code>csrr</code> de <code>mcycle</code> está implementado en el P4 y la placa aguantó.
+      Aun así <code>all</code> no lo llama, para que el chequeo rutinario siga siendo seguro.</div>
+
+    <h3>Los ocho dominios, con lo medido</h3>
+    <table>
+      <tr><th>subcomando</th><th>qué mira</th><th>medido 2026-11-04</th><th>fallo = </th></tr>
+      <tr><td><code>clk</code></td><td>monotonía de <code>millis()</code> (200 lecturas), cuentas/ms ±2 %, <code>micros()</code> en 100 ms, 30 latidos <code>HB</code></td><td><span class="st ok">monótona OK</span> · <span class="st av">402.818 c/ms</span> · <span class="st ok">micros 111.533 µs (tol. 30 %)</span></td><td>todo retardo y todo temporizador de red; los ticks de <code>TCP_FREQ</code> se van</td></tr>
+      <tr><td><code>cpu</code></td><td><code>mcycle</code>/<code>mtime</code> + bucle de 200 000 iteraciones enteras</td><td><span class="st ok">ratio 0,9999 · 5,34 ciclos/iter</span></td><td>regresión de rendimiento del camino de instrucciones</td></tr>
+      <tr><td><code>mem</code></td><td><code>memlist</code>, <code>psram_free_bytes()</code>, patrón de 64 palabras vía <code>memget(256)</code>, alias <code>0x48</code>/<code>0x88</code>, <code>_l2reserve</code> vs 0x4FF20000</td><td><span class="st ok">64/64 OK · banda fantasma OK</span> · <span class="st av">alias: escribe 0xC0FFEE11, lee 0xaaafeeab</span></td><td>la banda fantasma vuelve: líneas a cero, <code>irq with null vector</code>, cuelgue mudo</td></tr>
+      <tr><td><code>net</code></td><td><code>netLookup(getdev("ETH0"))</code>, <b>buffers libres</b> = <code>semcount(bfptab[netpool].freebuf)</code>, ARP, rutas, <code>ESPETH_CTRL_STATS</code></td><td><span class="st ok">4/4 OK · 23 de 24 libres en reposo · 16 de 24 bajo <code>ping</code> · drops 0</span></td><td>la pila espera en <code>bufget()</code> y el espeth descarta: es la pérdida de tramas ya arreglada</td></tr>
+      <tr><td><code>dev</code></td><td><code>I2C_CTRL_PROBE</code> 0x18/0x34/0x38 (0x36 <b>no se toca</b>), <code>POWER_CTRL_PERCENT</code>, <code>AUDIO_CTRL_GET_VOLUME</code>, <code>TOUCH_CTRL_TYPE</code>, LBA0 con 0x55AA, <code>fs_mounted()</code></td><td><span class="st ok">todos OK · LBA0 + firma 55 AA correctos</span></td><td>cualquier dispositivo de la regresión del AGENTS.md §4</td></tr>
+      <tr><td><code>int</code></td><td>remitencia a <code>examples/psram-blob/xsh_irqmap.c</code></td><td><span class="st av">sin portar — es 1 de los 4 avisos</span></td><td>línea con <code>ie=1</code> y vector nulo = <code>irq_missing()</code> = placa parada (<code>clic.c:61</code>)</td></tr>
+      <tr><td><code>flash</code></td><td>ventana XIP 1:1 con el offset de fichero, magic <code>0xE9</code> del SBL en 0x2000, <code>_etext</code> vs el ULP</td><td><span class="st ok">1:1 OK · SBL OK</span></td><td>el OTA se pisa el ULP al crecer el kernel</td></tr>
+      <tr><td><code>stk</code></td><td>pico por hebra con <code>stack_peak()</code></td><td><span class="st av">12 hebras · indicio, no medida</span></td><td>ver "lo que no comprueba" abajo</td></tr>
+    </table>
+
+    <div class="note danger"><b>El <code>0xE9</code> del kernel no está en 0x5000, y eso importa al OTA
+      (punto 18).</b> <code>ld.script:26</code> pone <code>FLASH (rx) : ORIGIN = 0x40005000</code>: el kernel está
+      enlazado <b>para ejecutar en la ventana XIP</b> (VMA == LMA), así que en ese offset hay código
+      (<code>0x6f</code> = <code>jal</code>), no la cabecera ESP.  El ULP en 0x100000 empieza con
+      <code>0x97</code> (<code>lui</code>).  La cabecera la consume el SBL al cargar.  La comprobación
+      "kernel no pisa ULP" hay que hacerla con <code>_etext</code> vs 0x100000, no buscando magos.</div>
+
+    <h3>Lo que <code>syscheck</code> no comprueba</h3>
+    <ul>
+      <li><b><code>stk</code> no ve la cadena profunda:</b> <code>stack_peak()</code> se muestrea en el cambio de
+        contexto; <code>tcpTimer</code> marcaba ~100 B con 65 KB de pila. El dimensionado real se hizo con
+        <code>-fstack-usage</code> (<code>esp_hosted_dispatch_rx</code> = 1664 B).</li>
+      <li><b>LCD y touch no se validan de verdad:</b> se comprueba que el panel responde; pintar una prueba dejaría
+        el panel en un estado que no es el del <code>dash</code>.</li>
+      <li><b>No hay prueba de estrés:</b> lee cuántos buffers quedan, no los agota (y 23/24 en reposo es un
+        resultado <b>mejor</b> que el previsto en 1.1).</li>
+      <li><b>No hay FAT profundo:</b> <code>fs_mounted()</code> y abrir la raíz, sin <code>df</code>.</li>
+      <li><b>El <code>int</code> es una receta, no una medición:</b> falta portar el barrido del CLIC.</li>
+      <li><b>Escribe en el heap, pero por su allocator:</b> 64 palabras con <code>memget(256)</code>/<code>memfree</code>
+        y 64 bytes en un <code>psram_malloc</code> que luego libera. <b>La primera versión escribía en
+        <code>memheap</code></b> — ahí vive la cabecera <code>struct memblock</code> del primer bloque libre y
+        corrompía el heap de la shell. Corregido; no volver a escribir en <code>memheap</code> ni <code>memlist</code>.</li>
+    </ul>
+
+    <h3>Cifras absolutas medidas (las de antes, más las del reloj)</h3>
+    <p>Las dos ratios de audio ya existían; ahora hay medición de reloj directa, y cuadran: el −0,47 % del I2S es
+      del propio I2S, no del <code>clkfreq</code>, porque <code>clkcount()</code> y el I2S comen del mismo cristal.
+      El error del 11 % está en el número declarado y en el rearme del tick.</p>
+    <table>
+      <tr><th>magnitud</th><th>teórico</th><th>medido en placa</th><th>desvío</th></tr>
+      <tr><td>velocidad del core</td><td>360 MHz</td><td><b>319,977 MHz</b></td><td>−11,1 %</td></tr>
+      <tr><td>frecuencia del <code>mtime</code></td><td>360 MHz</td><td><b>320,010 MHz</b></td><td>−11,1 %</td></tr>
+      <tr><td>cuentas de <code>mtime</code> por ms de kernel</td><td>360.000</td><td><b>402.818</b></td><td>+11,9 %</td></tr>
+      <tr><td>duración de 1 s del kernel</td><td>1,000 s</td><td><b>1,26 s</b> (por cuentas) / <b>1,28 s</b> (por el PC)</td><td>+26 % / +28 %</td></tr>
+      <tr><td>bucle de referencia</td><td>—</td><td><b>5,34 ciclos/iter</b></td><td>cifra de comparación entre builds</td></tr>
+      <tr><td>sincronismo del I2S (reg. 0x74, muestras de 16 bits)</td><td>96.000 /s</td><td>95.551 /s</td><td>−0,47 %</td></tr>
+      <tr><td>captura de micrófono por <code>read()</code></td><td>192.000 B/s</td><td>193.547 B/s</td><td>+0,80 %</td></tr>
+    </table>
+  </div>
+
+  <div class="grid g2">
+    <div class="card">
+      <h2><code>p4clk.py</code>: el PC como única referencia absoluta</h2>
+      <pre>/home/daniel/esp-idf-py/bin/python examples/syscheck/p4clk.py 172.16.0.117 30</pre>
+      <p>Abre el telnet del puerto 23, manda <code>syscheck clk</code> y ajusta la <b>pendiente</b> de
+        <code>xinums</code> contra <code>time.monotonic()</code>. Devuelve ratio, ppm, deriva en s/hora, mediana de
+        intervalos y los <b>MHz absolutos del <code>mtime</code></b> (con corrección de envoltorio módulo 2³² por
+        paso, porque lo que llega es la palabra baja; la vuelta real es cada <b>13,4 s</b>, no 11,93).
+        <b>Medido: ratio 0,78066 y 320,010 MHz.</b></p>
+      <p><b>No abre <code>/dev/ttyACM0</code></b>: abrir el puerto resetea la placa y se cae el WiFi. Es la única
+        forma de medir sin perder el enlace.  El <code>python3</code> del sistema no tiene <code>pyserial</code>.</p>
+      <div class="note warn">Límites del método: el latido lo produce <code>sleep(1000)</code>, o sea el reloj bajo
+        prueba; el primer retardo lleva la conexión TCP y el arranque del comando, así que se descarta; los saltos
+        &gt;1500 ms se cuentan aparte porque son colas de la shell. Con 1 ms de resolución contra <em>jitter</em> de
+        red WiFi, <b>por debajo de ~200 ppm no hay nada interpretable</b> — aquí el desvío es del 22 %, así que la
+        lectura sí vale.</div>
+      <div class="note danger">Dos cosas que se aprendieron usándolo: (1) daba un ratio absurdo de 105.278 porque
+        todas las líneas de un mismo <code>recv()</code> se fechaban en el mismo instante — ahora cada línea hereda
+        el <code>monotonic()</code> de su trama. (2) <b>cierra el socket de golpe</b>, que era el reproductor
+        supuesto de <b>#62</b>: medido el 2026-11-04 con <code>p4teln.py</code> y <code>p4rst.py</code> (FIN y RST
+        con <code>syscheck mem</code> imprimiendo en vuelo), el <code>telnetserver</code> <b>vuelve a aceptar en 1 s
+        en los 4 ciclos</b>. El <code>Connection refused</code> que se veía es otra cosa: con <code>-n 1</code> no
+        hay cola de <em>accept</em> y el PCB que escucha se convierte en la conexión.</div>
+    </div>
+
+    <div class="card">
+      <h2>Orden de corrida, de menor a mayor riesgo (el que se usó)</h2>
+      <label class="ck"><input type="checkbox" checked><span><b>1 · <code>syscheck dev</code></b> — solo lecturas; es la regresión del AGENTS.md §4</span></label>
+      <label class="ck"><input type="checkbox" checked><span><b>2 · <code>syscheck mem</code></b> — escribe en heaps propios (<code>memget</code>)</span></label>
+      <label class="ck"><input type="checkbox" checked><span><b>3 · <code>syscheck clk</code></b> — 32 s; por telnet, y guarda la salida</span></label>
+      <label class="ck"><input type="checkbox" checked><span><b>4 · <code>syscheck net</code></b> — lectura de tablas</span></label>
+      <label class="ck"><input type="checkbox" checked><span><b>5 · <code>syscheck flash</code></b> — lectura de la ventana XIP</span></label>
+      <label class="ck"><input type="checkbox" checked><span><b>6 · <code>syscheck stk</code></b> — lectura de pilas</span></label>
+      <label class="ck"><input type="checkbox" checked><span><b>7 · <code>p4clk.py</code></b> — en paralelo con el 3</span></label>
+      <label class="ck"><input type="checkbox" checked><span><b>8 · <code>syscheck cpu</code></b> — al último por si acaso; <b>no paniqueó</b></span></label>
+      <h3>Cableado (ya aplicado)</h3>
+      <ol>
+        <li>Fuente en <code>shell/xsh_syscheck.c</code>.</li>
+        <li><code>C_FILES += xsh_syscheck.c</code> en <code>shell/Makerules</code>.</li>
+        <li><code>{"syscheck", FALSE, xsh_syscheck}</code> en <code>commandtab[]</code> (<code>shell/shell.c:80</code>) y el prototipo en <code>include/shell.h:154</code>.</li>
+        <li><code>make clean &amp;&amp; make</code> — el incremental no recompila a los dependientes al tocar un <code>.h</code> (<code>DEPFLAGS</code> está vacío).</li>
+      </ol>
+      <div class="note">Cuatro cosas que compilar no ve y hubo que cazar en placa: el <code>printf</code> del port
+        <b>no soporta <code>%p</code></b> (usa <code>0x%08x</code> + <code>(unsigned)(uintptr_t)</code>); escribir en
+        <code>memheap</code> corrompe el heap; la SD no se abre — es <code>control(sd, SD_CTRL_SEEK, 0, 0)</code> +
+        <code>read()</code> y la firma MBR está en <code>blk[510]=0x55</code>, <code>blk[511]=0xAA</code>; y el bucle
+        de referencia con <code>millis()</code> daba <b>0 ms</b> (caben 200.000 iteraciones en un tick) — hay que
+        usar <code>micros()</code>.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ RECURSOS ============================ -->
+<section id="recursos" role="tabpanel" hidden>
+  <div class="card">
+    <h2>Revisión de recursos de <code>conf.c</code> (punto 16)</h2>
+    <p class="sub">Recordatorio: <code>system/conf.c</code> es <b>generado</b>. Todo lo de aquí se toca en
+      <code>compile/platforms/esp32p4/xinu.conf</code>.</p>
+    <table>
+      <tr><th>#</th><th>hallazgo</th><th>propuesta</th><th>coste</th></tr>
+      <tr><td>1.1</td><td><b><code>NET_POOLSIZE 24</code></b> frente a una exigencia de <b>≥164</b> simultáneos:
+        <code>ARP_NQUEUE 32</code> + <code>RT_NQUEUE 32</code> + <code>RAW_IBLEN 100</code>. Cada buffer cuesta
+        <code>roundword(1598 + sizeof(struct packet)) + sizeof(struct poolbuf)</code> ≈ <b>1616 B</b></td>
+        <td><b>Propuesta C:</b> <code>NET_POOLSIZE 96</code> + <code>RAW_IBLEN 32</code> → 96 × 1616 ≈ 155 KB en
+        lugar de 264 KB, y la cola de RAW deja de ser la que se come el pool</td><td>−128 buffers de RAM · +116 KB</td></tr>
+      <tr><td>1.2</td><td><code>conf.h:85-88</code> duplica lo de <code>conf.h:147-150</code></td><td>dejar una sola fuente en <code>xinu.conf</code></td><td>0</td></tr>
+      <tr><td>1.3</td><td><code>FLASH : ORIGIN = 0x40000000, LENGTH = 31M</code> sobre un chip de <b>16 MB</b></td><td>bajar a <code>15M</code> (de 0x5000 al final) para que <code>ld</code> corte si el kernel crece</td><td>0</td></tr>
+      <tr><td>1.4</td><td><code>DHCP_RENEW</code>/<code>DHCP_REBIND</code> están <b>definidos y nunca usados</b></td><td>o se implementa la renovación o se quitan, para que el IP no caduque en silencio</td><td>—</td></tr>
+      <tr><td>1.5</td><td>DNS fijo en <code>8.8.8.8</code> sin <code>resolvtab</code></td><td>usar el servidor que trae el DHCP</td><td>bajo</td></tr>
+      <tr><td>1.6</td><td><code>curl</code>/<code>wget</code>/<code>ip</code> existen como <code>.c</code> pero no están registrados</td><td>una fila en <code>commandtab[]</code> cada uno</td><td>0</td></tr>
+      <tr><td>1.7</td><td>Veredictos <b>sin cambio</b>: <code>NTHREAD</code>, <code>NSEM</code>, <code>NMON</code>, <code>NMAILBOX</code> (obligatorios por construcción), <code>NET_NTHR 1</code> (más hebras no arreglan la carrera RX)</td><td><code>NTCP 10 → 16</code> <b>solo si</b> el httpd pasa a concurrente</td><td>6 PCB</td></tr>
+    </table>
+    <div class="note">El <code>NET_POOLSIZE</code> es el hallazgo que explica parte de los síntomas de red que se
+      vieron como «WiFi poco fiable»: con 24 buffers, un pico de tráfico agota el pool, <code>bufget()</code> bloquea
+      a <code>netRecv</code>, y el anillo de 8 del espeth empieza a descartar. La métrica que lo expone es
+      <code>semcount(bfptab[netpool].freebuf)</code> — que es exactamente lo que imprime <code>syscheck net</code>.</div>
+  </div>
+</section>
+
+<!-- ============================ ROADMAP ============================ -->
+<section id="roadmap" role="tabpanel" hidden>
+  <div class="card">
+    <h2>Lo que queda por portar (puntos 13…19)</h2>
+    <table>
+      <tr><th>punto</th><th>qué</th><th>veredicto</th><th>primer paso concreto</th></tr>
+      <tr><td>13</td><td>TinySTT / TinyTTS (pschatzmann)</td><td><span class="st av">viable, pesado</span></td><td>el front-end de audio <b>ya existe</b> (mic → 48 kHz/16 bits → <code>read(AUDIO0)</code>). Empezar por MFCC+DTW entero (sin entrenamiento) o TinyML con una red pequeña; TTS por formantes, no por neural</td></tr>
+      <tr><td>14</td><td>TinyUSB</td><td><span class="st fa">bloqueo real</span></td><td>los pads USB <b>son</b> el USB-Serial-JTAG por el que entra la consola: usar OTG pierde el ttyACM0. Decide la vía primero (#31/#33)</td></tr>
+      <tr><td>15</td><td>Cámara OV5647, foto y vídeo a SD</td><td><span class="st fa">difícil</span></td><td>4 etapas (DVP/MIPI-CSI → ISR → códec → almacenamiento). Sin cabeceras portadas (<code>mipi_csi_*_ll.h</code> está en el SDK), placa sin conector documentado, y 5,9 MB/s en raw es <b>inviable</b> contra el ancho del SD: obliga a JPEG por el acelerador (<code>jpeg_ll.h</code>)</td></tr>
+      <tr><td>17</td><td>Librería MP3</td><td><span class="st ok">la más barata del lote</span></td><td>Helix o MAD en <b>punto fijo</b> (encaja con la regla de no-flotante); minimp3 es coma flotante y solo vale dentro de un <code>.app</code> con FPU. La salida ya está hecha: <code>write(AUDIO0, pcm, n)</code> al 48 kHz/16 bits</td></tr>
+      <tr><td>18</td><td>UDP server + bootloader de actualización</td><td><span class="st av">3 piezas</span></td><td>(a) <code>udpserver</code> que reciba y escriba <code>/xinu.img</code> en la SD (#56); (b) un flag en sector crudo de la SD; (c) <b>el aplicador tiene que ir en el SBL</b>, no en Xinu: el kernel corre XIP desde la propia flash que hay que reescribir. Validar la cabecera <code>0xE9</code> antes de copiar; plano A/B en el hueco de 0x80000. <b>Ojo (medido con <code>syscheck flash</code>)</b>: el kernel enlazado XIP <b>no</b> lleva <code>0xE9</code> en su offset — en 0x5000 hay código (<code>0x6f</code>) y el ULP empieza con <code>0x97</code>; si la imagen en <code>/xinu.img</code> es cruda, no hay magic que validar, y el "no pisa el ULP" hay que comprobarlo con <code>_etext</code> vs <code>0x100000</code></td></tr>
+      <tr><td>19</td><td>Dashboard Material Design en la SD servido por httpd</td><td><span class="st av">hecho, no servible aún</span></td><td>este tablero existe (<code>docs/xinu-p4-dashboard.html</code>). Para servirlo desde la placa hace falta que el httpd lea FAT; la alternativa inmediata es pintarlo en el LCD</td></tr>
+    </table>
+    <div class="note">Sobre el OTA: «Xinu recibe la imagen, reinicia, el bootloader ve la imagen en SD, la copia a
+      flash y salta» es exactamente el diseño correcto — y la parte no obvia es que el <b>bootloader es el SBL</b>
+      (4.304 B en HP_TCM), porque es el único código que puede reprogramar la flash desde la que se está ejecutando
+      el kernel.</div>
+  </div>
+
+  <div class="card">
+    <h2>Tareas abiertas</h2>
+    <table>
+      <tr><th>#</th><th>tarea</th><th>qué la desbloquea</th></tr>
+      <tr><td>38</td><td>W5: app de red que demuestre conectividad de punta a punta</td><td>decisiones de alcance; la pila ya funciona</td></tr>
+      <tr><td>56</td><td>port de <code>udpserver</code></td><td>es la pieza (a) del OTA</td></tr>
+      <tr><td>57</td><td><code>httpd</code> completo + REST + webterm + memtty</td><td>es lo que permite servir el dashboard desde SD</td></tr>
+      <tr><td>58</td><td>actualización por UDP + mecanismo de aplicador en P4</td><td>depende de 56 y del SBL</td></tr>
+      <tr><td><b>61</b></td><td><b>latencia en reposo del C6</b> (p50 ≈ 81 ms; power save / DUP)</td><td>el SDK bare-metal <b>no expone</b> la API de power save: hay que buscar el RPC o conformarse</td></tr>
+      <tr><td><b>62</b></td><td><b>telnet no vuelve a aceptar tras un corte brusco del cliente</b> — <b>no se reproduce</b> (2026-11-04: FIN y RST con salida en vuelo, el 23 vuelve a escuchar en 1 s en 4/4 ciclos)</td><td>el <em>refused</em> que se veía es diseño: sin cola de <em>accept</em>, <code>-n 1</code> = un cliente. Queda la carrera de <code>telnetWrite.c:50/:62</code> (devuelven <code>SYSERR</code> sin liberar <code>osem</code>) y el <code>telnetFlush.c:31/:36</code> que sale con las interrupciones desactivadas; heredadas del S3, sin tocar</td></tr>
+      <tr><td>31 / 33</td><td>comando <code>usb msc</code> · bring-up del FS-PHY</td><td>la decisión de la consola (pads compartidos)</td></tr>
+      <tr><td>63 / 64</td><td>documentación y <code>syscheck</code></td><td><span class="st ok">docs escritos · cableado, flasheado y medido en placa (23 tests / 19 OK / 4 avisos / 0 fallos)</span></td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Credenciales y privacidad (punto 11, la app de «mis claves»)</h2>
+    <p>Propuesto un <b>box propio</b>: clave maestra → PBKDF2-HMAC-SHA256 → claves envueltas en un fichero de la SD.
+      Sin volcar las del navegador.</p>
+    <div class="note">Motivo técnico, no de prudencia genérica: (a) la pila no tiene TLS, así que consultar los
+      guardados de Google exige <code>https</code> que aquí no existe; (b) no hay endpoint accesible sin OAuth en un
+      dispositivo sin reloj fiable ni navegador. El diseño propio, en cambio, sí cabe: el cifrado es local y la SD
+      ya está montada.</div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>Tablero generado a partir de <code>docs/port-esp32p4/</code> el 2026-11-04 contra el árbol de
+    <code>/home/daniel/xinu-p4.2</code>. Sin dependencias externas: es un único fichero HTML con CSS y 14 líneas de
+    JS, pensado para abrirse offline, copiarse a la SD y, cuando el <code>httpd</code> lea FAT, servirse desde la
+    placa. <b>Ningún <code>.c</code> ni <code>.h</code> del kernel se modificó para hacer esta documentación.</b></p>
+</footer>
+
+<script>
+(function () {
+  var tabs = document.querySelectorAll('.tabs button');
+  function select(id) {
+    tabs.forEach(function (b) { b.setAttribute('aria-selected', b.dataset.t === id ? 'true' : 'false'); });
+    document.querySelectorAll('main > section').forEach(function (s) { s.hidden = s.id !== id; });
+    if (location.hash !== '#' + id) { history.replaceState(null, '', '#' + id); }
+    window.scrollTo(0, 0);
+  }
+  tabs.forEach(function (b) { b.addEventListener('click', function () { select(b.dataset.t); }); });
+  var start = location.hash.slice(1);
+  if (start && document.getElementById(start)) { select(start); }
+})();
+</script>
+</body>
+</html>

@@ -25,6 +25,7 @@
 #ifndef __ESP_HOSTED_CTRL_H
 #define __ESP_HOSTED_CTRL_H
 
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -105,11 +106,41 @@ enum
     ESP_HOSTED_CTRL_ERR_TX = -1002,
     ESP_HOSTED_CTRL_ERR_TIMEOUT = -1003,
     ESP_HOSTED_CTRL_ERR_MISMATCH = -1004,
+    /* Port Xinu: la capa de control tiene un solo hueco de espera, asi que un
+     * RPC crudo pedido con otro en vuelo se rechaza en vez de pisarlo. */
+    ESP_HOSTED_CTRL_ERR_BUSY = -1005,
 };
 
 bool esp_hosted_ctrl_init(void);
 void esp_hosted_ctrl_deinit(void);
 bool esp_hosted_ctrl_is_ready(void);
+
+/*
+ * Port Xinu (W6-R1): RPC "crudo" para los ids que el SDK no conoce.
+ *
+ * Los RPC 286/288/289/294 (arranque de barrido, recuento, registros y el
+ * AP asociado con su RSSI) no tienen aqui su emparejamiento Req/Resp, y el
+ * shell tenia que poppear la cola del transporte por su cuenta: eso se lleva
+ * por delante las tramas de ETH0 que la pila aun no bajo (medido: 25 % de
+ * perdida de ping mientras se leia la senal).  Esta entrada reserva el uid y
+ * el msg_id de la respuesta en la propia capa de control, que es quien baja
+ * las tramas, de modo que el RPC no compite con nadie y la red no pierde nada.
+ *
+ * @param req_id     id de peticion (el campo del protobuf request es el mismo)
+ * @param args       protobuf del parametro, o NULL para pedir sin payload
+ * @param resp       destino del sobre RpcResponse completo
+ * @param resp_cap   capacidad de resp
+ * @param resp_len   salida: bytes escritos en resp (puede ser NULL)
+ * @param timeout_ms cuantos milisegundos se espera la respuesta
+ * @return ESP_HOSTED_CTRL_OK con la respuesta en resp; error en otro caso
+ */
+int esp_hosted_ctrl_raw_request(uint32_t req_id,
+                                const uint8_t *args,
+                                size_t args_len,
+                                uint8_t *resp,
+                                size_t resp_cap,
+                                size_t *resp_len,
+                                uint32_t timeout_ms);
 
 int esp_hosted_ctrl_feature_control(esp_hosted_ctrl_feature_t feature,
                                     esp_hosted_ctrl_feature_command_t command,

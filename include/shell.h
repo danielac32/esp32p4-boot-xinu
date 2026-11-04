@@ -137,8 +137,21 @@ shellcmd xsh_ping(int, char *[]);
 shellcmd xsh_wget(int, char *[]);
 shellcmd xsh_curl(int, char *[]);
 shellcmd xsh_telnetd(int, char *[]);
+shellcmd xsh_netup(int, char *[]);
+shellcmd xsh_netdown(int, char *[]);
+shellcmd xsh_arp(int, char *[]);
+shellcmd xsh_route(int, char *[]);
+shellcmd xsh_netstat(int, char *[]);
+shellcmd xsh_ifconfig(int, char *[]);
+shellcmd xsh_tcpstat(int, char *[]);
+shellcmd xsh_udpstat(int, char *[]);
+shellcmd xsh_dns(int, char *[]);
+shellcmd xsh_telnet(int, char *[]);
+shellcmd xsh_telnetserver(int, char *[]);
+shellcmd xsh_netboot(int, char *[]);
 shellcmd xsh_test(int, char *[]);
 shellcmd xsh_elfapp(int, char *[]);
+shellcmd xsh_syscheck(int, char *[]);
 /* Configuration commands (JSON documents in /config on the FAT volume) */
 
 #endif                          /* _SHELL_H_ */

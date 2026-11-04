@@ -18,6 +18,27 @@ DEFS     += -D_XINU_PLATFORM_ESP32P4_
 # esp-hosted's SDIO transport guards on TARGET_SOC_ESP32P4
 DEFS     += -DTARGET_SOC_ESP32P4
 
+# W2.d: trazas de la capa de control esp_hosted (espHostedCtrl.c).  El fichero
+# es copia verbatim del SDK y ya trae su propio guardagolopes: con
+# ESP_HOSTED_CTRL_DEBUG a 1 imprime por que TLV/RPC pasa en cada trama RX y en
+# cada peticion.  APAGADAS: el RPC de control y la asociacion del STA ya estan
+# verificados en placa, y con la pila TCP/IP encima el volumen de tramas hace
+# ilegible la consola.
+#DEFS     += -DESP_HOSTED_CTRL_DEBUG=1
+
+# Mis trazas para el motor SDIO (espHostedSdio.c): con DEBUG a 1 imprime cada
+# trama RX parseada y cada TX, ademas de los pasos del attach.  El macro que
+# usa es el mismo #ifndef ESP_HOSTED_SDIO_DEBUG que trae el fichero de referencia.
+# APAGADAS por lo mismo (ambas tienen su default 0 en el .c).
+#DEFS     += -DESP_HOSTED_SDIO_DEBUG=1
+
+# Trazas del cliente DHCP (network/dhcpc/dhcp.h): con este define activo
+# dhcpClient/dhcpSendRequest/dhcpRecvReply imprimen por donde pasan y por que
+# fallan.  APAGADA: `netup' por DHCP esta cerrado (DESCOFFER->REQUEST->ACK y
+# la IP de la AP en placa), y las lineas de traza ensuciaban el arranque de
+# red.  Se vuelve a activar si el DHCP falla.
+#DEFS     += -DENABLE_DHCP_TRACE
+
 # LVGL needs its own directory on the include path so that
 # lv_conf_internal.h's __has_include("lv_conf.h") finds lvgl/lv_conf.h
 # (otherwise it falls back to a relative "../../lv_conf.h" that does not
@@ -46,12 +67,26 @@ DEFS     += -DFATFS_INC_TEST_HOOKS
 
 # Embedded Xinu components to build into the kernel image.
 # CLEAN MINIMAL BOOT: the shell and the FAT library (fatfs/) it drives.
-APPCOMPS := shell apps fatfs
+# W3: `network' es la pila nativa de Xinu (arp/ipv4/icmp/route/dhcpc/net),
+# portada de /home/daniel/xinu-s3-amp.  Sus ficheros se activan con NETHER
+# (definido en xinu.conf); los sockets TCP/UDP/raw viven en device/ y van en
+# DEVICES.  `mailbox' acompaña a la pila: arpInit/icmpInit/rtInit mensajean por
+# mailboxAlloc/mailboxSend/mailboxReceive.
+APPCOMPS := shell apps fatfs network mailbox
 
 # Extra static libraries linked into the kernel (built from lib/<name>/).
 
 # Linking data files across ABIs needs this
 LDFLAGS  += --no-warn-mismatch
+
+# La capa de control esp_hosted (espHostedCtrl.c) mueve varints protobuf de
+# 64 bits; el core es RV32IMAFDC pero el -march del build omite 'd', asi que
+# gcc no puede hacer `x << s` / `x >> s` en linea y llama a __ashldi3/__lshrdi3,
+# que viven en libgcc.  compile/Makefile ya contempla esto: con -lgcc en LDLIBS
+# enlaza con gcc y -nostdlib, sin arrastrar la libc.  El toolchain /opt/riscv32
+# tiene UNA sola multilib, o sea que el driver encuentra libgcc.a sin necesidad
+# de pasarle -march/-mabi al enlazar.
+LDLIBS   += -lgcc
 
 # Embedded Xinu device drivers to build into the kernel image.
 # CLEAN MINIMAL BOOT: serial driver (tty over UART0) + PSRAM (memory/stack)
@@ -65,7 +100,11 @@ LDFLAGS  += --no-warn-mismatch
 # + audio (ES8311 codec on that same bus; I2C control only until the I2S stage).
 # + sdio-esp32p4 (W1: SDIO enumeration probe of the ESP32-C6 on slot 1 of the
 #   shared SDMMC host; not a devtab device yet, only compiled in for the probe).
-DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat gpio i2c touch power audio sdio-esp32p4
+# + espeth-esp32p4 (W3: ETH0, el C6 como interfaz Ethernet cruda para la pila
+#   nativa; reusa el transporte esp_hosted de sdio-esp32p4).
+# + raw / udp / tcp (W3: los sockets de la pila nativa de Xinu; cada instancia
+#   del devtab es una entrada de su tabla, rawtab/udptab/tcptab).
+DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat gpio i2c touch power audio sdio-esp32p4 espeth-esp32p4 raw udp tcp telnet
 
 # ============================================================================
 # Imágenes de arranque del P4: SBL (bootloader de 2ª etapa) y ULP (firmware

@@ -16,6 +16,7 @@
 #include <semaphore.h>
 #include <mailbox.h>
 #include <monitor.h>
+#include <network.h>
 #include <sdmmc.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -155,6 +156,19 @@ static int sysinit(void)
     for (i = 0; i < NDEVS; i++)
     {
         devtab[i].init((device*)&devtab[i]);
+    }
+#endif
+
+#if NNETIF
+    /* W3: arrancar la pila nativa de Xinu despues de los devices, porque
+     * espethInit() ya ha registrado su callback de tramas Ethernet en
+     * esp_hosted.  netInit() (network/net/netInit.c) monta el pool de
+     * paquetes -- bfpalloc(NET_MAX_PKTLEN + sizeof(struct packet),
+     * NET_POOLSIZE), 1598+32 por 24 buffers, ~39 KB del heap de L2MEM --
+     * las tablas ARP/ruta/ICMP y crea el hilo tcpTimer. */
+    if (SYSERR == netInit())
+    {
+        kprintf("WARNING: netInit failed\r\n");
     }
 #endif
 

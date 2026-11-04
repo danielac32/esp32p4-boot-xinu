@@ -22,9 +22,24 @@
  * SOFTWARE.
  */
 
+#include <interrupt.h>
+#include <sdmmc.h>
 #include <string.h>
 #include "esp_hosted.h"
 
+/*
+ * La cola de rx la producen los hilos que llaman a esp_hosted_poll() y la
+ * consumen los que llaman a esp_hosted_dispatch_rx().  Desde que el RPC crudo
+ * de la capa de control bomba su propia espera, hay varios hilos a la vez en
+ * esos dos papeles (netRecv, el panel, la shell), asi que el anillo necesita
+ * secciones criticas: `head', `tail' y `count' se leen y se escriben sin
+ * atomidad, dos lectores pueden sacar la misma ranura (medido: pings con
+ * DUP) y una escritura puede pisar una ranura que aun no se ha leido
+ * (medido: `descartadas' subiendo con el HTTP en marcha).
+ *
+ * Son secciones cortas y sin bloqueo (copiar una ranura cuesta microsegundos),
+ * coherentes con lo que ya hace espethRead() con su anillo.
+ */
 typedef struct
 {
     esp_hosted_packet_t items[ESP_HOSTED_RX_QUEUE_DEPTH];
@@ -67,10 +82,14 @@ static void esp_hosted_reset_state(void)
 static bool esp_hosted_queue_push(const esp_hosted_frame_info_t *info, const void *payload, size_t len)
 {
     esp_hosted_packet_t *slot = NULL;
+    irqmask im;
+
+    im = disable();
 
     if (s_rx_queue.count >= ESP_HOSTED_RX_QUEUE_DEPTH)
     {
         s_rx_queue.dropped++;
+        restore(im);
         return false;
     }
 
@@ -85,19 +104,33 @@ static bool esp_hosted_queue_push(const esp_hosted_frame_info_t *info, const voi
 
     s_rx_queue.head = (uint8_t)((s_rx_queue.head + 1U) % ESP_HOSTED_RX_QUEUE_DEPTH);
     s_rx_queue.count++;
+
+    restore(im);
     return true;
 }
 
 static bool esp_hosted_queue_pop(esp_hosted_packet_t *out_packet)
 {
-    if (out_packet == NULL || s_rx_queue.count == 0U)
+    irqmask im;
+
+    if (out_packet == NULL)
     {
+        return false;
+    }
+
+    im = disable();
+
+    if (s_rx_queue.count == 0U)
+    {
+        restore(im);
         return false;
     }
 
     *out_packet = s_rx_queue.items[s_rx_queue.tail];
     s_rx_queue.tail = (uint8_t)((s_rx_queue.tail + 1U) % ESP_HOSTED_RX_QUEUE_DEPTH);
     s_rx_queue.count--;
+
+    restore(im);
     return true;
 }
 
@@ -235,6 +268,19 @@ bool esp_hosted_set_transport(const esp_hosted_transport_t *transport)
     return true;
 }
 
+/*
+ * Bombear el transporte es una secuencia de VARIAS transacciones SDIO (leer
+ * INT_RAW, limpiarlo, pedir la longitud, bajar la ventana, decodificar y
+ * encolado) que comparte estado por hebra unica dentro del driver: el
+ * frame_buf del slot, el contador de creditos y el presupuesto de 4 paquetes.
+ * Con la cola sin candado dos hilos que bombeaban a la vez podian ver el
+ * mismo NEW_PACKET y leer la misma trama dos veces, o pisarse el buffer.
+ *
+ * `poll' se serializa con el candado del bloque SDHOST (system/sdmmcbus.c,
+ * monitor reentrante), que es el mismo candado que ya usa cada transferencia
+ * del slot 1 y el de la microSD del slot 0: pedirlo aqui solo amplia la seccion
+ * critica de lo que de todas formas ya estaba serializado.
+ */
 void esp_hosted_poll(void)
 {
     if (!s_initialized || s_transport.poll == NULL)
@@ -242,7 +288,9 @@ void esp_hosted_poll(void)
         return;
     }
 
+    sdmmcBusLock();
     s_transport.poll(s_transport.ctx);
+    sdmmcBusUnlock();
 }
 
 bool esp_hosted_rx_submit(const esp_hosted_frame_info_t *info, const void *payload, size_t len)

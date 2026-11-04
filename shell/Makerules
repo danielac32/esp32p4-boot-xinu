@@ -34,7 +34,30 @@ C_FILES += xsh_dash.c p4demoTask.c
 C_FILES += xsh_sd.c
 
 # WiFi over the ESP32-C6 (SDIO slot 1 del host compartido)
-C_FILES += xsh_wifi.c
+C_FILES += xsh_wifi.c xsh_wifi_scan.c
+
+# Red: la pila TCP/IP nativa de Xinu sube/baja la interfaz ETH0 (el C6 como
+# NIC) y 'ping' prueba la conectividad end-to-end.  Los de estado son los
+# comando de red de xinu-s3-amp: arp/netstat/route/ifconfig miran arptab[],
+# netiftab[] y rttab[]; tcpstat/udpstat recorren tcptab[]/udptab[]; 'dns'
+# resuelve un nombre por el UDP0 contra 8.8.8.8.
+C_FILES += xsh_netup.c xsh_netdown.c xsh_ping.c xsh_arp.c xsh_route.c \
+           xsh_netstat.c xsh_ifconfig.c xsh_tcpstat.c xsh_udpstat.c xsh_dns.c
+
+# Servidores: 'telnetserver' arranca los hilos de sesion sobre device/telnet
+# (un TELNETn por cliente, con su shell) y 'telnet' es el cliente hacia otra
+# maquina.  'telnetd' es el alias de siempre.
+C_FILES += xsh_telnet.c xsh_telnetserver.c xsh_telnetd.c
+
+# 'httpd' es el servidor de la pagina de prueba: escucha en el 80 con la pila
+# TCP nativa y devuelve un index que va embebido en el .c (sin FAT, sin /api/
+# y sin webterm, que son las partes del httpd de xinu-s3-amp que aqui todavia
+# no tienen donde apoyarse).
+C_FILES += xsh_httpd.c
+
+# Arranque automatico de red (lo invoca main.c como tarea, y tambien es el
+# comando `netboot' para reintentarlo a mano).
+C_FILES += xsh_netboot.c
 
 # Filesystem commands (FAT volume on the microSD)
 C_FILES += xsh_pwd.c xsh_cd.c xsh_ls.c xsh_cat.c xsh_head.c xsh_tail.c \
@@ -44,6 +67,11 @@ C_FILES += xsh_pwd.c xsh_cd.c xsh_ls.c xsh_cat.c xsh_head.c xsh_tail.c \
 # Ejercicio ELF: el binario cargable lo genera 'make' en
 # examples/p4-elfapp (app_elf.h); aqui solo vive el cargador.
 C_FILES += xsh_elfapp.c
+
+# 'syscheck' es la comprobacion del kernel (clk/cpu/mem/net/dev/int/flash/stk).
+# La referencia externa, el guion del PC (p4clk.py) y como leer cada cifra se
+# quedan en examples/syscheck/ y en docs/port-esp32p4/06-syscheck.md.
+C_FILES += xsh_syscheck.c
 
 
 S_FILES =

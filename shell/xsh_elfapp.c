@@ -96,7 +96,10 @@
 #define P_RISCV_HI20        26
 #define P_RISCV_LO12_I      27
 
-#define MAX_SECC            24          /* secciones ALLOC + tablas de relocacion   */
+#define MAX_SECC            48          /* secciones ALLOC + tablas de relocacion.
+                                           Con -ffunction-sections cada funcion del
+                                           app es su .text.X y su .rela.text.X: el
+                                           selftest de 10 funciones llega a 35.  */
 #define MAX_SIMB            192
 #define MAX_EXPORTS         16
 
@@ -129,7 +132,7 @@ static const struct export exports[MAX_EXPORTS] = {
     { "strncmp",        (void *)strncmp        },
     { "strcpy",         (void *)strcpy         },
     { "psram_malloc",   (void *)psram_malloc   },
-    { "psram_freemem",  (void *)psram_freemem  },
+    { "psram_free",     (void *)psram_free  },
     { "sleep",          (void *)sleep          },
     { "exit",           (void *)eapp_exit      },
 };
@@ -250,6 +253,12 @@ shellcmd xsh_elfapp(int nargs, char *args[])
     /* Margen para que el align de la primera seccion no se coma el calculo. */
     total += 64U;
 
+    /* psram_malloc devuelve (cabecera + 1), o sea el puntero DE USUARIO 8 bytes
+     * despues del struct memblock; por eso se suelta con psram_free(), que hace el
+     * block-- y usa block->length.  psram_freemem(cached, total) pediria la
+     * CABECERA y la longitud real (total + 8): dado el puntero de usuario inserta
+     * un nodo dentro del bloque y deja la cabecera huerfana, que es como el monton
+     * se veia pisado y psram_malloc devolvia NULL habiendo 31 MB libres. */
     cached = (uintptr_t)psram_malloc(total);
     if (cached == 0U)
     {
@@ -322,7 +331,7 @@ shellcmd xsh_elfapp(int nargs, char *args[])
     if (NULL == symtab || NULL == strtabsec)
     {
         printf("elfapp: sin .symtab: no hay nada que resolver\r\n");
-        psram_freemem((void *)cached, total);
+        psram_free((void *)cached);
         return SYSERR;
     }
 
@@ -332,11 +341,16 @@ shellcmd xsh_elfapp(int nargs, char *args[])
     if (nsym > MAX_SIMB)
     {
         printf("elfapp: %u simbolos, sube MAX_SIMB\r\n", nsym);
-        psram_freemem((void *)cached, total);
+        psram_free((void *)cached);
         return SYSERR;
     }
 
-    for (i = 0; i < nsym; i++)
+    /* El indice 0 de .symtab es el simbolo nulo por convencion ELF:
+     * st_name=0 y st_shndx=SHN_UNDEF.  NO es un externo que haya que resolver;
+     * si se le deja entrar en el bucle, resolve("") devuelve NULL y el cargador
+     * aborta con "simbolo SIN EXPORTAR: " (nombre vacio), que es exactamente lo
+     * que salio en placa.  Se empieza en 1. */
+    for (i = 1; i < nsym; i++)
     {
         simval[i] = 0U;
         if (sym[i].st_shndx == SHN_UNDEF)
@@ -347,7 +361,7 @@ shellcmd xsh_elfapp(int nargs, char *args[])
             {
                 printf("elfapp: simbolo SIN EXPORTAR: %s\r\n",
                        strtab + sym[i].st_name);
-                psram_freemem((void *)cached, total);
+                psram_free((void *)cached);
                 return SYSERR;
             }
             simval[i] = (unsigned int)(uintptr_t)d;
@@ -383,7 +397,7 @@ shellcmd xsh_elfapp(int nargs, char *args[])
         {
             nombre = shstrtab + sh[i].sh_name;
             printf("elfapp: %s no apunta a seccion colocada\r\n", nombre);
-            psram_freemem((void *)cached, total);
+            psram_free((void *)cached);
             return SYSERR;
         }
 
@@ -402,7 +416,7 @@ shellcmd xsh_elfapp(int nargs, char *args[])
                 nombre = shstrtab + sh[tgt].sh_name;
                 printf("elfapp: relocacion %u fuera de %s (0x%08x)\r\n",
                        relocs, nombre, sitio);
-                psram_freemem((void *)cached, total);
+                psram_free((void *)cached);
                 return SYSERR;
             }
 
@@ -471,7 +485,7 @@ shellcmd xsh_elfapp(int nargs, char *args[])
                                    "0x%08x -> 0x%08x\r\n",
                                    strtab + sym[s].st_name,
                                    (unsigned)sitio, (unsigned)(S + A));
-                            psram_freemem((void *)cached, total);
+                            psram_free((void *)cached);
                             return SYSERR;
                         }
                     }
@@ -482,7 +496,7 @@ shellcmd xsh_elfapp(int nargs, char *args[])
                     nombre = shstrtab + sh[tgt].sh_name;
                     printf("elfapp: relocacion %u (tipo %u) NO SOPORTADA en %s\r\n",
                            relocs, tipo, nombre);
-                    psram_freemem((void *)cached, total);
+                    psram_free((void *)cached);
                     return SYSERR;
             }
         }
@@ -508,7 +522,7 @@ shellcmd xsh_elfapp(int nargs, char *args[])
     if (NULL == entrada)
     {
         printf("elfapp: no hay _start definido\r\n");
-        psram_freemem((void *)cached, total);
+        psram_free((void *)cached);
         return SYSERR;
     }
 
@@ -525,7 +539,7 @@ shellcmd xsh_elfapp(int nargs, char *args[])
                (unsigned long)devuelto, eapp_codigo);
     }
 
-    psram_freemem((void *)cached, total);
+    psram_free((void *)cached);
 
     return OK;
 }

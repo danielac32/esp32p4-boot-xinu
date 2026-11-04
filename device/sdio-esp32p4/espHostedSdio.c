@@ -125,6 +125,16 @@
 #define ESP_HOSTED_SDIO_DMA_FSM_READ_REQ_WAIT   4U
 #define ESP_HOSTED_SDIO_DMA_FSM_WRITE_REQ_WAIT  5U
 
+/* Adición Xinu (DESVIACION LP_IOMUX, ver esp_hosted_sdio_setup_matrix_pin): el
+ * IO_MUX de bajo poder.  DR_REG_LP_IOMUX_BASE = 0x5012B000, pad n en +0x08+4n,
+ * y el bit 4 de ese registro es MUX_SEL (1 = lo manda el GPIO de bajo poder).
+ * Solo cubre GPIO0..GPIO15.  Los mismos valores, medidos y validados en placa,
+ * estan en sdioProbe.c (sdioPadToMatrix) y en include/sdio.h. */
+#define ESP_HOSTED_SDIO_LP_IOMUX_BASE           0x5012B000UL
+#define ESP_HOSTED_SDIO_LP_PAD_REG(n)           (ESP_HOSTED_SDIO_LP_IOMUX_BASE + 0x08UL + 4UL * (n))
+#define ESP_HOSTED_SDIO_LP_MUX_SEL              BIT(4)
+#define ESP_HOSTED_SDIO_LAST_LP_PAD             15U
+
 #ifndef ESP_HOSTED_SDIO_DEBUG
 #define ESP_HOSTED_SDIO_DEBUG 0
 #endif
@@ -917,6 +927,30 @@ static void esp_hosted_sdio_setup_matrix_pin(uint32_t gpio_num, bool output_en, 
     (void)output_en;    /* la salida la gobierna la senal conectada, no GPIO_ENABLE */
     (void)input_en;     /* ver comentario: el IE se pone siempre, tambien en CLK */
 
+    /* DESVIACION LP_IOMUX (dueno del pad), y es la que congela el motor.
+     * En el ESP32-P4 los pads GPIO0..GPIO15 tienen DOS duenos: el IO_MUX de
+     * alto poder (el que toca el codigo de referencia) y LP_IOMUX, que decide
+     * con su bit MUX_SEL quien manda el pad (1 = GPIO de bajo poder).  Medido
+     * en ESTA placa despues del arranque:
+     *      LP_PAD14 = 0x0000001a  (MUX_SEL=1, pull-up de bajo poder)
+     *      LP_PAD15 = 0x0000041a  (MUX_SEL=1)
+     * o sea que GPIO14 (DAT0 del C6) y GPIO15 (DAT1) los tiene el dominio de
+     * bajo poder y NINGUNA de las escrituras del IO_MUX llega al pad: DAT0 se
+     * queda clavado en 0, STATUS bit9 (data_busy) vale 1 desde el primer
+     * instante y toda orden con wait_complete --incluida la update-clock
+     * interna-- se aparca con CMD_START=1 y congela el bloque compartido con la
+     * microSD.  Por eso `wifi up` moria en "transfer clock setup failed".  Los
+     * pads 16..19 (CMD/CLK/D2/D3) no tienen registro LP --LP_IOMUX solo cubre
+     * 0..15-- y por eso obedecian.  Se limpia el bit antes de tocar el IO_MUX,
+     * igual que hace sdioPadToMatrix() en sdioProbe.c (validado en placa con
+     * la sonda `wifi hold`). */
+    if (gpio_num <= ESP_HOSTED_SDIO_LAST_LP_PAD)
+    {
+        volatile uint32_t *lp = (volatile uint32_t *)ESP_HOSTED_SDIO_LP_PAD_REG(gpio_num);
+
+        *lp = *lp & ~ESP_HOSTED_SDIO_LP_MUX_SEL;
+    }
+
     val = *pad;
     val &= ~(IO_MCU_SEL_MASK | IO_FUN_WPD | IO_FUN_WPU | IO_FUN_DRV_MASK);
     /* IO_FUN_IE siempre activo, como en W1 y como hace el propio camino del
@@ -1685,6 +1719,20 @@ static void esp_hosted_sdio_submit_rx_frame(const esp_hosted_sdio_payload_header
                             (unsigned)info.flags,
                             (unsigned)info.seq_num,
                             (unsigned)((info.if_type == ESP_HOSTED_IF_HCI) ? info.hci_pkt_type : info.priv_pkt_type));
+
+        /* Volcado de los bytes que suben del esclavo.  Es el equivalente del
+         * dump de tx: permite ver el TLV/protobuf EXACTO que el NCP escribe, y
+         * con ello su esquema real (numeros de campo del sobre Rpc) en lugar de
+         * suponerlo.  Se limita a 40 bytes por trama. */
+        {
+            uint32_t rx_i;
+            uint32_t rx_n = ((uint32_t)len < 40U) ? (uint32_t)len : 40U;
+
+            ESP_HOSTED_SDIO_LOG("[esp_hosted_sdio] rx buf(%u):", (unsigned)len);
+            for (rx_i = 0U; rx_i < rx_n; rx_i++)
+                ESP_HOSTED_SDIO_LOG(" %02x", payload[rx_i]);
+            ESP_HOSTED_SDIO_LOG("\n");
+        }
     }
 
     (void)esp_hosted_rx_submit(&info, payload, len);
@@ -1791,6 +1839,20 @@ static size_t esp_hosted_sdio_transport_tx(const esp_hosted_frame_info_t *info,
     {
         header->hci_pkt_type = info->hci_pkt_type;
     }
+    /* DESVIACION DEL ORIGINAL (medida en placa).  hci_pkt_type y priv_pkt_type
+     * son el MISMO byte de la cabecera de 12 (la union del struct), y el codigo
+     * de referencia solo lo rellena cuando el canal es HCI.  Para PRIV deja el
+     * 0 del memset, de modo que la respuesta del host al EVENT_INIT del esclavo
+     * --que debe ir marcada con priv_pkt_type 0x33=EVENT, igual que la que él
+     * sube-- salia con 0x00 y el slave no la podia clasificar.  Medido:
+     *      tx if=5 ifnum=0 len=17 ... aux=0x00   (aux es el byte de la union)
+     * Se rellena tambien en PRIV; el camino RX ya lo leia al reves
+     * (info.priv_pkt_type = header->priv_pkt_type) y por eso el C6 si nos lo
+     * llego a marcar 0x33. */
+    if (info->if_type == ESP_HOSTED_IF_PRIV)
+    {
+        header->priv_pkt_type = info->priv_pkt_type;
+    }
 
     if (len != 0U)
     {
@@ -1818,6 +1880,28 @@ static size_t esp_hosted_sdio_transport_tx(const esp_hosted_frame_info_t *info,
                             (unsigned)info->flags,
                             (unsigned)info->seq_num,
                             (unsigned)((info->if_type == ESP_HOSTED_IF_HCI) ? header->hci_pkt_type : header->priv_pkt_type));
+        /* Volcado de los bytes que se van a escribir en el FIFO del esclavo
+         * (cabecera de 12 + payload), ya con la suma de verificacion calculada.
+         * El esclavo consume nuestros creditos pero no devuelve nada por el
+         * canal SERIAL, y desde el host no hay forma de saber si el rechazo es
+         * de transporte (bytes corruptos / checksum) o de contenido (TLV +
+         * protobuf).  Aqui queda registrado lo que el C6 tendria que estar
+         * leyendo, byte a byte.  Detras de ESP_HOSTED_SDIO_DEBUG porque con la
+         * pila TCP/IP encima esto imprime en cada trama y vuelve ilegible la
+         * consola (y ademas frena el sondeo del bus). */
+#if ESP_HOSTED_SDIO_DEBUG
+        {
+            uint32_t dump_i;
+            uint32_t dump_n = (frame_len < 40U) ? frame_len : 40U;
+
+            printf("[esp_hosted_sdio] tx buf(%u):", (unsigned)frame_len);
+            for (dump_i = 0U; dump_i < dump_n; dump_i++)
+            {
+                printf(" %02x", sdio->tx_frame[dump_i]);
+            }
+            printf("\n");
+        }
+#endif
     }
 
     buf_needed = (frame_len + ESP_HOSTED_SDIO_RX_BUF_WINDOW - 1U) / ESP_HOSTED_SDIO_RX_BUF_WINDOW;

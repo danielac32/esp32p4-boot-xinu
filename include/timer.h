@@ -5,7 +5,8 @@
  * against a bare-metal `timer.h`) can use the Xinu clock: milliseconds /
  * microseconds counters and busy-wait delays.
  *
- * Implementation: system/timershim.c (over clkcount()/udelay()/mdelay()).
+ * Implementation: system/timershim.c (millis() over clktime/clkticks,
+ * micros() over clkcount(), delays over udelay()/mdelay()).
  */
 /* Embedded Xinu, Copyright (C) 2026.  All rights reserved. */
 
@@ -19,8 +20,13 @@
  * is already running, so this is a no-op. */
 void timer_init(void);
 
-/* Monotonic counters derived from clkcount(). */
+/* Milliseconds since boot, from the kernel clock (clktime + clkticks).
+ * Monotonic for 2^32 ms (~49 days). */
 uint32_t millis(void);
+
+/* Microseconds, from the raw mtime counter (360 MHz on the P4).  The 32-bit
+ * result wraps every ~11.9 s, so only use it for short intervals and always
+ * with unsigned subtraction. */
 uint32_t micros(void);
 
 /* Busy-wait delays (udelay/mdelay). */

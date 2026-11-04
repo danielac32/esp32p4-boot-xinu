@@ -1,27 +1,23 @@
 /**
- * @file xsh_p4demo.c
+ * xsh_p4demo.c
  *
- * Launcher Material + Voz + gestor de archivos FAT.
+ * Embedded Xinu / LCD vertical 320 x 480.
  *
- * Embedded Xinu / pantalla vertical 320 x 480.
+ * Ejecutar UNA sola instancia:
  *
- * Dispositivos:
- *   /dev/lcd0
- *   /dev/touch0
- *   /dev/power0  (opcional)
- *   /dev/audio0  (para Voz)
+ * ready(create(p4demoTask, INITSTK, INITPRIO,
+ *              "p4demo", 0), RESCHED_YES);
  *
- * Entrada:
- *   int p4demoTask(void);
+ * No ejecutar dashTask ni p4monitorTask simultaneamente.
  *
- * El volumen FAT debe estar montado previamente.
+ * Barra superior:
+ * - Icono WiFi de tres arcos y un punto.
+ * - Desconectado: gris con raya.
+ * - Asociado sin RSSI: gris.
+ * - Senal conocida: rosa, amarillo o verde.
  *
- * No ejecutar simultaneamente con dashTask ni con otra
- * tarea que utilice pantalla, touch o audio.
- *
- * AVISO:
- * El borrado de archivos es real y no tiene papelera.
- * Solo se permite borrar directorios vacios.
+ * Conserva las APIs del kernel original.
+ * El RPC de RSSI sigue dependiendo de wifiSignalRead().
  */
 
 #include <stddef.h>
@@ -39,46 +35,47 @@
 #include <audio.h>
 #include <memory.h>
 #include <fsutil.h>
+#include <timer.h>
+#include <esp_hosted_ctrl.h>
 
-/* ----------------------------------------------------------
- * Colores
- * ---------------------------------------------------------- */
+/* Implementadas en tu kernel, como en el archivo original. */
+int wifiSignalRead(int32_t *rssi, uint32_t *channel);
+int wifiSignalQuality(int32_t rssi);
 
-#define P_BG        RGB565(16, 20, 29)
-#define P_CARD      RGB565(29, 35, 47)
-#define P_TRACK     RGB565(47, 55, 71)
-#define P_TEXT      RGB565(237, 240, 249)
-#define P_MUTED     RGB565(159, 171, 192)
+/* ---------- Colores ---------- */
 
-#define P_BLUE      RGB565(173, 198, 255)
-#define P_GREEN     RGB565(156, 224, 184)
-#define P_PINK      RGB565(255, 179, 201)
-#define P_YELLOW    RGB565(244, 218, 147)
-#define P_PURPLE    RGB565(211, 188, 255)
-#define P_CYAN      RGB565(151, 222, 235)
+#define P_BG        RGB565(16,20,29)
+#define P_CARD      RGB565(29,35,47)
+#define P_TRACK     RGB565(47,55,71)
+#define P_TEXT      RGB565(237,240,249)
+#define P_MUTED     RGB565(159,171,192)
+#define P_BLUE      RGB565(173,198,255)
+#define P_GREEN     RGB565(156,224,184)
+#define P_PINK      RGB565(255,179,201)
+#define P_YELLOW    RGB565(244,218,147)
+#define P_PURPLE    RGB565(211,188,255)
+#define P_CYAN      RGB565(151,222,235)
+#define P_INK       RGB565(29,37,54)
+#define P_REC_BG    RGB565(91,38,49)
+#define P_VOICE_BG  RGB565(48,66,100)
+#define P_WIFI_DIM  RGB565(65,77,96)
 
-#define P_INK       RGB565(29, 37, 54)
-#define P_REC_BG    RGB565(91, 38, 49)
-#define P_VOICE_BG  RGB565(48, 66, 100)
-
-/* ----------------------------------------------------------
- * Touch y temporizacion
- * ---------------------------------------------------------- */
+/* ---------- Tiempo ---------- */
 
 #define P_POINTS        5U
 #define P_POLL          15U
 #define P_BATT_MS       1000U
+#define P_WIFI_MS       15000U
+#define P_WIFI_TRIES    3U
 #define P_RELEASE_MISS  3U
+#define P_IDLE_MS       120000U
 
-/* ----------------------------------------------------------
- * Audio: parametros del archivo anterior
- * ---------------------------------------------------------- */
+/* ---------- Audio ---------- */
 
 #define REC_PCM_DIRECT  0x40000000U
 #define REC_BYTES_MS    192U
 #define REC_MAX_MS      6000U
 #define REC_CAPACITY    (REC_BYTES_MS * REC_MAX_MS)
-
 #define REC_CHUNK       4096U
 #define REC_FULLSCALE   32767U
 #define REC_METER_MS    40U
@@ -95,13 +92,22 @@
 #define V_METER_W       240
 #define V_METER_H       12
 
-/* ----------------------------------------------------------
- * Gestor FAT
- * ---------------------------------------------------------- */
+/* ---------- Archivos ---------- */
 
 #define FM_ROWS         5U
 #define FM_LIST_Y       156
 #define FM_ROW_H        38
+
+/*
+ * WiFi ocupa x=159..195, y=14..41.
+ * Bateria empieza en x=206: no se superponen.
+ */
+#define P_WIFI_BOX_X    159
+#define P_WIFI_BOX_Y    14
+#define P_WIFI_BOX_W    37
+#define P_WIFI_BOX_H    28
+#define P_WIFI_CX       177
+#define P_WIFI_CY       37
 
 enum p_app {
     P_HOME = 0,
@@ -118,10 +124,6 @@ enum voice_state {
     VOICE_RECORD,
     VOICE_PLAY
 };
-
-/* ----------------------------------------------------------
- * Estado general
- * ---------------------------------------------------------- */
 
 static int p_lcd;
 static int p_touch;
@@ -144,53 +146,157 @@ static const uint16_t p_accents[] = {
     P_BLUE, P_GREEN, P_PINK
 };
 
-static int p_theme = 0;
-static bool p_playing = false;
-static bool p_switch = true;
-static int p_note = 0;
-static int p_volume = 60;
+static int p_theme;
+static bool p_playing;
+static bool p_switch;
+static int p_note;
+static int p_volume;
 
-static long p_battery = -1;
+static long p_battery;
 static uint32_t p_last_battery;
 
-/* ----------------------------------------------------------
- * Estado de Voz
- * ---------------------------------------------------------- */
+/* WiFi */
 
-static uint8_t *v_cached = NULL;
-static uint8_t *v_buffer = NULL;
+static int p_signal;
+static bool p_link;
+static uint32_t p_last_wifi_ms;
+static int p_wifi_shown = -100;
+static unsigned p_wifi_tries;
 
-static enum voice_state v_state = VOICE_IDLE;
+/* Reposo y touch */
 
-static int v_meter_width = 0;
-static uint16_t v_meter_color = P_BLUE;
+static uint32_t p_last_touch_ms;
+static bool p_screen_asleep;
+static bool p_ignore_touch;
+static unsigned p_ignore_release;
 
-static char v_last_hint[48] = "";
-static const char *v_error = NULL;
+/* Voz */
 
-/* ----------------------------------------------------------
- * Estado de Archivos
- * ---------------------------------------------------------- */
+static uint8_t *v_cached;
+static uint8_t *v_buffer;
+static enum voice_state v_state;
+static int v_meter_width;
+static uint16_t v_meter_color;
+static char v_last_hint[48];
+static const char *v_error;
 
-static char fm_path[FS_PATH_MAX] = "";
+/* FAT */
+
+static char fm_path[FS_PATH_MAX];
 static fl_dirent fm_entries[FM_ROWS];
-
-static unsigned fm_offset = 0U;
-static unsigned fm_count = 0U;
-
-static bool fm_more = false;
-static bool fm_ready = false;
-static int fm_selected = -1;
-static bool fm_confirm = false;
-
+static unsigned fm_offset;
+static unsigned fm_count;
+static bool fm_more;
+static bool fm_ready;
+static int fm_selected;
+static bool fm_confirm;
 static char fm_delete_path[FS_PATH_MAX];
-static char fm_status[80] = "";
+static char fm_status[80];
 
-/* ----------------------------------------------------------
- * Dibujo basico
- * ---------------------------------------------------------- */
+/* Declaraciones para refrescar indicadores al despertar. */
+static void p_draw_battery(void);
+static void p_draw_signal(void);
 
-static void p_rect(int x, int y, int w, int h, uint16_t color)
+/* ---------- Reloj y reposo ---------- */
+
+/*
+ * Requiere que millis() del kernel avance en milisegundos.
+ * La resta uint32_t admite el rollover normal del contador.
+ */
+static uint32_t p_now(void)
+{
+    return (uint32_t)millis();
+}
+
+static void p_idle_poll(void)
+{
+    uint32_t now;
+    uint32_t elapsed;
+    long result;
+
+    if (p_screen_asleep)
+        return;
+
+    now = p_now();
+    elapsed = (uint32_t)(now - p_last_touch_ms);
+
+    if (elapsed < P_IDLE_MS)
+        return;
+
+    printf(
+        "p4demo: intento OFF now=%lu last=%lu "
+        "elapsed=%lu limite=%lu\n",
+        (unsigned long)now,
+        (unsigned long)p_last_touch_ms,
+        (unsigned long)elapsed,
+        (unsigned long)P_IDLE_MS
+    );
+
+    result = control(p_lcd, LCD_CTRL_BACKLIGHT, 0, 0);
+
+    if (result != SYSERR) {
+        p_screen_asleep = true;
+        printf("p4demo: pantalla apagada por inactividad\n");
+    } else {
+        printf("p4demo: fallo al apagar backlight\n");
+    }
+}
+
+static int p_read_touch(touch_point_t *points)
+{
+    int count = (int)read(p_touch, points, P_POINTS);
+    uint32_t now = p_now();
+
+    if (count > (int)P_POINTS)
+        count = SYSERR;
+
+    if (count > 0) {
+        p_last_touch_ms = now;
+        p_ignore_release = 0U;
+
+        if (p_screen_asleep) {
+            p_ignore_touch = true;
+
+            printf(
+                "p4demo: despertar por touch now=%lu\n",
+                (unsigned long)now
+            );
+
+            if (control(
+                    p_lcd, LCD_CTRL_BACKLIGHT, 1, 0
+                ) != SYSERR) {
+                p_screen_asleep = false;
+
+                p_draw_signal();
+                p_draw_battery();
+
+                printf(
+                    "p4demo: pantalla encendida por touch\n"
+                );
+            } else {
+                printf(
+                    "p4demo: fallo al encender backlight\n"
+                );
+            }
+        }
+    } else if (count == 0 && p_ignore_touch) {
+        if (++p_ignore_release >= P_RELEASE_MISS) {
+            p_ignore_touch = false;
+            p_ignore_release = 0U;
+        }
+    } else if (count < 0) {
+        p_ignore_release = 0U;
+    }
+
+    p_idle_poll();
+    return count;
+}
+
+/* ---------- Dibujo ---------- */
+
+static void p_rect(
+    int x, int y, int w, int h, uint16_t color
+)
 {
     struct lcd_rect r;
 
@@ -198,7 +304,6 @@ static void p_rect(int x, int y, int w, int h, uint16_t color)
         w += x;
         x = 0;
     }
-
     if (y < 0) {
         h += y;
         y = 0;
@@ -209,10 +314,8 @@ static void p_rect(int x, int y, int w, int h, uint16_t color)
 
     if (w > LCD_W - x)
         w = LCD_W - x;
-
     if (h > LCD_H - y)
         h = LCD_H - y;
-
     if (w <= 0 || h <= 0)
         return;
 
@@ -225,8 +328,10 @@ static void p_rect(int x, int y, int w, int h, uint16_t color)
     control(p_lcd, LCD_CTRL_RECT, (long)&r, 0);
 }
 
-static void p_round(int x, int y, int w, int h,
-                    int radius, uint16_t color)
+static void p_round(
+    int x, int y, int w, int h,
+    int radius, uint16_t color
+)
 {
     int row;
 
@@ -235,7 +340,6 @@ static void p_round(int x, int y, int w, int h,
 
     if (radius > w / 2)
         radius = w / 2;
-
     if (radius > h / 2)
         radius = h / 2;
 
@@ -251,23 +355,29 @@ static void p_round(int x, int y, int w, int h,
         int dx = 0;
         int inset;
 
-        while ((dx + 1) * (dx + 1) + dy * dy
-               <= radius * radius) {
+        while (
+            (dx + 1) * (dx + 1) + dy * dy
+            <= radius * radius
+        )
             ++dx;
-        }
 
         inset = radius - dx;
 
-        p_rect(x + inset, y + row,
-               w - 2 * inset, 1, color);
-
-        p_rect(x + inset, y + h - row - 1,
-               w - 2 * inset, 1, color);
+        p_rect(
+            x + inset, y + row,
+            w - 2 * inset, 1, color
+        );
+        p_rect(
+            x + inset, y + h - row - 1,
+            w - 2 * inset, 1, color
+        );
     }
 }
 
-static void p_text(const char *s, int x, int y,
-                   uint16_t fg, uint16_t bg)
+static void p_text(
+    const char *s, int x, int y,
+    uint16_t fg, uint16_t bg
+)
 {
     struct lcd_text t;
 
@@ -280,8 +390,9 @@ static void p_text(const char *s, int x, int y,
     control(p_lcd, LCD_CTRL_TEXT, (long)&t, 0);
 }
 
-static void p_center(const char *s, int y,
-                     uint16_t fg, uint16_t bg)
+static void p_center(
+    const char *s, int y, uint16_t fg, uint16_t bg
+)
 {
     int x = (LCD_W - (int)strlen(s) * LCD_TEXT_W) / 2;
 
@@ -291,15 +402,18 @@ static void p_center(const char *s, int y,
     p_text(s, x, y, fg, bg);
 }
 
-static bool p_inside(int x, int y,
-                      int bx, int by, int bw, int bh)
+static bool p_inside(
+    int x, int y, int bx, int by, int bw, int bh
+)
 {
-    return x >= bx && x < bx + bw &&
-           y >= by && y < by + bh;
+    return x >= bx && x < bx + bw
+        && y >= by && y < by + bh;
 }
 
-static void p_button(int x, int y, int w,
-                     const char *label, uint16_t color)
+static void p_button(
+    int x, int y, int w,
+    const char *label, uint16_t color
+)
 {
     int tx = x + (w - (int)strlen(label) * LCD_TEXT_W) / 2;
 
@@ -307,9 +421,7 @@ static void p_button(int x, int y, int w,
     p_text(label, tx, y + 14, P_INK, color);
 }
 
-/* ----------------------------------------------------------
- * Iconos
- * ---------------------------------------------------------- */
+/* ---------- Iconos ---------- */
 
 static void p_triangle(int cx, int cy, uint16_t color)
 {
@@ -317,19 +429,18 @@ static void p_triangle(int cx, int cy, uint16_t color)
 
     for (i = 0; i < 22; ++i) {
         int half = (21 - i) / 2;
-
         p_rect(cx - 8 + i, cy - half,
                1, 2 * half + 1, color);
     }
 }
 
-static void p_mic(int cx, int y, uint16_t fg, uint16_t bg)
+static void p_mic(
+    int cx, int y, uint16_t fg, uint16_t bg
+)
 {
     p_round(cx - 14, y + 10, 28, 25, 12, fg);
     p_round(cx - 11, y + 7, 22, 25, 10, bg);
-
     p_round(cx - 7, y, 14, 25, 7, fg);
-
     p_rect(cx - 2, y + 34, 4, 7, fg);
     p_round(cx - 11, y + 40, 22, 3, 1, fg);
 }
@@ -388,9 +499,7 @@ static void p_icon(enum p_app app, int x, int y)
     }
 }
 
-/* ----------------------------------------------------------
- * Bateria
- * ---------------------------------------------------------- */
+/* ---------- Bateria ---------- */
 
 static void p_draw_battery(void)
 {
@@ -434,27 +543,235 @@ static void p_update_battery(void)
 
     if (value != p_battery) {
         p_battery = value;
-        p_draw_battery();
+
+        if (!p_screen_asleep)
+            p_draw_battery();
     }
 }
 
 static void p_poll_battery(uint32_t now)
 {
-    if (now - p_last_battery >= P_BATT_MS) {
-        p_last_battery = now;
+    if ((uint32_t)(now - p_last_battery) < P_BATT_MS)
+        return;
+
+    p_last_battery = now;
+
+    if (!p_screen_asleep)
         p_update_battery();
+}
+
+/* ---------- WiFi: icono de arcos ---------- */
+
+/*
+ * Estados:
+ * -2: desconectado.
+ * -1: conectado, RSSI desconocido.
+ *  1: senal debil, punto.
+ *  2: punto + arco interior.
+ *  3: punto + dos arcos.
+ *  4: punto + tres arcos.
+ */
+static int p_wifi_state(void)
+{
+    if (!p_link)
+        return -2;
+    if (p_signal < 0)
+        return -1;
+    if (p_signal < 25)
+        return 1;
+    if (p_signal < 50)
+        return 2;
+    if (p_signal < 75)
+        return 3;
+
+    return 4;
+}
+
+/*
+ * Arco superior de 90 grados, grosor 2 pixeles.
+ *
+ * Se dibuja por tramos horizontales.
+ * Sin float, sqrt, fuentes ni imagenes externas.
+ */
+static void p_wifi_arc(
+    int cx, int cy, int radius, uint16_t color
+)
+{
+    int dy;
+    int inner = radius - 2;
+    int outer2 = radius * radius;
+    int inner2 = inner * inner;
+
+    for (dy = -radius; dy <= 0; ++dy) {
+        int dx;
+        int start = -radius;
+
+        for (dx = -radius; dx <= radius + 1; ++dx) {
+            bool paint = false;
+
+            if (dx <= radius) {
+                int distance = dx * dx + dy * dy;
+                int ax = dx < 0 ? -dx : dx;
+
+                paint = distance <= outer2
+                    && distance >= inner2
+                    && ax <= -dy;
+            }
+
+            if (paint) {
+                if (start == -radius)
+                    start = dx;
+            } else if (start != -radius) {
+                p_rect(
+                    cx + start, cy + dy,
+                    dx - start, 1, color
+                );
+                start = -radius;
+            }
+        }
     }
 }
 
-/* ----------------------------------------------------------
- * Marco y launcher
- * ---------------------------------------------------------- */
+static void p_draw_signal(void)
+{
+    int state = p_wifi_state();
+    int level = state > 0 ? state : 0;
+    uint16_t active;
+    uint16_t inactive;
+    int i;
+
+    static const int radii[3] = {8, 14, 20};
+
+    p_rect(
+        P_WIFI_BOX_X, P_WIFI_BOX_Y,
+        P_WIFI_BOX_W, P_WIFI_BOX_H, P_BG
+    );
+
+    if (level >= 3)
+        active = P_GREEN;
+    else if (level == 2)
+        active = P_YELLOW;
+    else
+        active = P_PINK;
+
+    inactive = state == -1 ? P_MUTED : P_WIFI_DIM;
+
+    for (i = 0; i < 3; ++i) {
+        bool enabled = level >= i + 2;
+
+        p_wifi_arc(
+            P_WIFI_CX, P_WIFI_CY, radii[i],
+            enabled ? active : inactive
+        );
+    }
+
+    /* Punto inferior de 4 x 4, con esquinas recortadas. */
+    {
+        uint16_t dot = level > 0 ? active : inactive;
+
+        p_rect(P_WIFI_CX - 1, P_WIFI_CY - 2, 2, 1, dot);
+        p_rect(P_WIFI_CX - 2, P_WIFI_CY - 1, 4, 2, dot);
+        p_rect(P_WIFI_CX - 1, P_WIFI_CY + 1, 2, 1, dot);
+    }
+
+    if (state == -2) {
+        /*
+         * Raya diagonal con borde de fondo para que
+         * destaque sobre los arcos.
+         */
+        for (i = 0; i < 19; ++i) {
+            int x = P_WIFI_CX - 9 + i;
+            int y = 19 + i;
+
+            p_rect(x - 1, y - 1, 4, 3, P_BG);
+        }
+
+        for (i = 0; i < 19; ++i)
+            p_rect(P_WIFI_CX - 9 + i, 19 + i,
+                   2, 1, P_MUTED);
+    }
+
+    p_wifi_shown = state;
+}
+
+static void p_update_wifi(void)
+{
+    bool connected;
+    int32_t rssi = 0;
+    uint32_t channel = 0;
+    int state;
+
+    connected = esp_hosted_wifi_sta_is_connected();
+
+    /*
+     * Detectar cambios de asociacion.
+     * No conservar la senal de un enlace desconectado.
+     */
+    if (connected != p_link) {
+        p_link = connected;
+        p_signal = -1;
+        p_wifi_tries = 0U;
+    }
+
+    if (!p_link) {
+        p_signal = -1;
+        p_wifi_tries = 0U;
+    } else if (
+        p_signal < 0 &&
+        p_wifi_tries < P_WIFI_TRIES
+    ) {
+        /*
+         * Se conserva el limite del original.
+         * Esta llamada puede bloquear: no se ha modificado
+         * el transporte del kernel.
+         */
+        ++p_wifi_tries;
+
+        if (wifiSignalRead(&rssi, &channel) == OK) {
+            int quality = wifiSignalQuality(rssi);
+
+            if (quality >= 0) {
+                if (quality > 100)
+                    quality = 100;
+
+                p_signal = quality;
+            }
+        }
+    }
+
+    state = p_wifi_state();
+
+    if (!p_screen_asleep && state != p_wifi_shown)
+        p_draw_signal();
+}
+
+static void p_poll_wifi(uint32_t now)
+{
+    if ((uint32_t)(now - p_last_wifi_ms) < P_WIFI_MS)
+        return;
+
+    p_last_wifi_ms = now;
+
+    if (p_screen_asleep)
+        return;
+
+    /*
+     * Siempre comprobar la asociacion.
+     *
+     * p_update_wifi() NO repite el RPC si ya tiene RSSI,
+     * pero si detecta una desconexion.
+     */
+    p_update_wifi();
+}
+
+/* ---------- Launcher ---------- */
 
 static void p_shell(void)
 {
     p_rect(0, 0, LCD_W, LCD_H, P_BG);
-
     p_text("P4 UI", 20, 21, p_accents[p_theme], P_BG);
+
+    p_draw_signal();
     p_draw_battery();
 
     p_round(90, 438, 140, 30, 15, P_CARD);
@@ -467,7 +784,6 @@ static void p_home(void)
     uint16_t accent = p_accents[p_theme];
 
     p_text("Hola.", 24, 76, P_TEXT, P_BG);
-
     p_round(24, 124, 272, 70, 22, accent);
 
     p_text("Material Playground", 40, 139, P_INK, accent);
@@ -478,20 +794,16 @@ static void p_home(void)
         enum p_app app = (enum p_app)(i + 1);
         int x = 32 + (i % 3) * 96;
         int y = 216 + (i / 3) * 104;
-        int tx;
+        int tx = x + (
+            64 - (int)strlen(p_names[app]) * LCD_TEXT_W
+        ) / 2;
 
         p_icon(app, x, y);
-
-        tx = x + (64 - (int)strlen(p_names[app]) *
-                  LCD_TEXT_W) / 2;
-
         p_text(p_names[app], tx, y + 72, P_TEXT, P_BG);
     }
 }
 
-/* ----------------------------------------------------------
- * Voz: interfaz
- * ---------------------------------------------------------- */
+/* ---------- Voz: dibujo ---------- */
 
 static void v_hint(const char *message)
 {
@@ -501,14 +813,14 @@ static void v_hint(const char *message)
     p_rect(8, 372, LCD_W - 16, 20, P_BG);
     p_center(message, 372, P_MUTED, P_BG);
 
-    snprintf(v_last_hint, sizeof(v_last_hint), "%s", message);
+    snprintf(v_last_hint, sizeof(v_last_hint),
+             "%s", message);
 }
 
 static uint16_t v_color(void)
 {
     if (v_state == VOICE_RECORD)
         return P_PINK;
-
     if (v_state == VOICE_PLAY)
         return P_GREEN;
 
@@ -530,6 +842,9 @@ static void v_meter(uint32_t peak)
     int width = v_meter_width;
     uint16_t color = v_color();
 
+    if (p_screen_asleep)
+        return;
+
     if (peak > REC_FULLSCALE)
         peak = REC_FULLSCALE;
 
@@ -548,11 +863,15 @@ static void v_meter(uint32_t peak)
             p_rect(V_METER_X, V_METER_Y,
                    width, V_METER_H, color);
     } else if (width > v_meter_width) {
-        p_rect(V_METER_X + v_meter_width, V_METER_Y,
-               width - v_meter_width, V_METER_H, color);
+        p_rect(
+            V_METER_X + v_meter_width, V_METER_Y,
+            width - v_meter_width, V_METER_H, color
+        );
     } else if (width < v_meter_width) {
-        p_rect(V_METER_X + width, V_METER_Y,
-               v_meter_width - width, V_METER_H, P_TRACK);
+        p_rect(
+            V_METER_X + width, V_METER_Y,
+            v_meter_width - width, V_METER_H, P_TRACK
+        );
     }
 
     v_meter_width = width;
@@ -585,8 +904,7 @@ static void v_draw_state(enum voice_state state)
         hint = "Tu voz, de vuelta";
     }
 
-    p_round(V_BTN_X, V_BTN_Y,
-            V_BTN_W, V_BTN_H, 24, bg);
+    p_round(V_BTN_X, V_BTN_Y, V_BTN_W, V_BTN_H, 24, bg);
 
     if (state == VOICE_PLAY)
         p_triangle(LCD_W / 2, V_BTN_Y + 40, fg);
@@ -601,7 +919,6 @@ static bool v_prepare(void)
 {
     if (p_audio == SYSERR)
         return false;
-
     if (v_buffer != NULL)
         return true;
 
@@ -610,10 +927,7 @@ static bool v_prepare(void)
     if (v_cached == NULL)
         return false;
 
-    /*
-     * Se conserva el alias de PSRAM del archivo anterior.
-     * Es especifico de esa implementacion de la placa.
-     */
+    /* Alias PSRAM conservado del original. */
     v_buffer = (uint8_t *)(
         (uintptr_t)v_cached + REC_PCM_DIRECT
     );
@@ -642,29 +956,23 @@ static void p_voice(void)
         v_hint("No hay memoria para grabar");
 }
 
-/* ----------------------------------------------------------
- * Voz: audio
- * ---------------------------------------------------------- */
+/* ---------- Voz: audio ---------- */
 
-static uint32_t v_peak(const uint8_t *data, uint32_t length)
+static uint32_t v_peak(
+    const uint8_t *data, uint32_t length
+)
 {
     uint32_t i;
     uint32_t peak = 0U;
 
     for (i = 0U; i + 1U < length; i += 2U) {
-        int16_t sample;
-        int32_t value;
-        uint32_t amplitude;
-
-        sample = (int16_t)(
+        int16_t sample = (int16_t)(
             (uint16_t)data[i] |
             ((uint16_t)data[i + 1U] << 8)
         );
-
-        value = (int32_t)sample;
-        amplitude = value < 0
-            ? (uint32_t)(-value)
-            : (uint32_t)value;
+        int32_t value = (int32_t)sample;
+        uint32_t amplitude = value < 0
+            ? (uint32_t)(-value) : (uint32_t)value;
 
         if (amplitude > peak)
             peak = amplitude;
@@ -686,17 +994,21 @@ static void v_dup_mono(uint8_t *data, uint32_t length)
 static void p_wait_release(void)
 {
     touch_point_t points[P_POINTS];
-    uint32_t misses = 0U;
+    unsigned misses = 0U;
 
     while (misses < P_RELEASE_MISS) {
-        int count = (int)read(p_touch, points, P_POINTS);
+        int count = p_read_touch(points);
 
-        if (count == 0)
+        if (count == 0) {
             ++misses;
-        else
+        } else if (count > 0) {
             misses = 0U;
+        } else {
+            printf("p4demo: error touch esperando liberacion\n");
+            return;
+        }
 
-        p_poll_battery(clktotal);
+        p_poll_battery(p_now());
         sleep(P_POLL);
     }
 }
@@ -704,23 +1016,22 @@ static void p_wait_release(void)
 static uint32_t v_record(void)
 {
     touch_point_t points[P_POINTS];
-
     uint32_t length = 0U;
     uint32_t last_meter;
     uint32_t last_touch;
     uint32_t last_data;
     uint32_t peak_window = 0U;
-    uint32_t misses = 0U;
+    unsigned misses = 0U;
 
     v_draw_state(VOICE_RECORD);
     v_meter_reset();
 
-    if (SYSERR == control(p_audio, AUDIO_CTRL_IN, 1, 0)) {
+    if (control(p_audio, AUDIO_CTRL_IN, 1, 0) == SYSERR) {
         v_error = "No se pudo iniciar el micro";
         return 0U;
     }
 
-    last_meter = clktotal;
+    last_meter = p_now();
     last_touch = last_meter;
     last_data = last_meter;
 
@@ -733,7 +1044,7 @@ static uint32_t v_record(void)
             chunk = REC_CHUNK;
 
         got = (int)read(p_audio, v_buffer + length, chunk);
-        now = clktotal;
+        now = p_now();
 
         if (got > 0) {
             uint32_t peak;
@@ -755,7 +1066,7 @@ static uint32_t v_record(void)
             break;
         }
 
-        if (now - last_meter >= REC_METER_MS) {
+        if ((uint32_t)(now - last_meter) >= REC_METER_MS) {
             last_meter = now;
             v_meter(peak_window);
             peak_window = 0U;
@@ -763,11 +1074,11 @@ static uint32_t v_record(void)
 
         p_poll_battery(now);
 
-        if (now - last_touch >= REC_TOUCH_MS) {
+        if ((uint32_t)(now - last_touch) >= REC_TOUCH_MS) {
             int down;
 
             last_touch = now;
-            down = (int)read(p_touch, points, P_POINTS);
+            down = p_read_touch(points);
 
             if (down > 0) {
                 misses = 0U;
@@ -780,8 +1091,10 @@ static uint32_t v_record(void)
             }
         }
 
+        p_idle_poll();
+
         if (got == 0) {
-            if (now - last_data >= REC_STALL_MS) {
+            if ((uint32_t)(now - last_data) >= REC_STALL_MS) {
                 v_error = "El micro no entrega audio";
                 break;
             }
@@ -800,8 +1113,10 @@ static uint32_t v_record(void)
 
 static void v_play(uint32_t length)
 {
+    touch_point_t points[P_POINTS];
     uint32_t offset = 0U;
     uint32_t last_meter;
+    uint32_t last_touch;
     uint32_t peak_window = 0U;
 
     if (length == 0U)
@@ -810,12 +1125,13 @@ static void v_play(uint32_t length)
     v_draw_state(VOICE_PLAY);
     v_meter_reset();
 
-    if (SYSERR == control(p_audio, AUDIO_CTRL_STREAM, 1, 0)) {
+    if (control(p_audio, AUDIO_CTRL_STREAM, 1, 0) == SYSERR) {
         v_error = "No se pudo iniciar la salida";
         return;
     }
 
-    last_meter = clktotal;
+    last_meter = p_now();
+    last_touch = last_meter;
 
     while (offset < length) {
         uint32_t chunk = length - offset;
@@ -839,14 +1155,20 @@ static void v_play(uint32_t length)
             peak_window = peak;
 
         offset += (uint32_t)written;
-        now = clktotal;
+        now = p_now();
 
-        if (now - last_meter >= REC_METER_MS) {
+        if ((uint32_t)(now - last_meter) >= REC_METER_MS) {
             last_meter = now;
             v_meter(peak_window);
             peak_window = 0U;
         }
 
+        if ((uint32_t)(now - last_touch) >= REC_TOUCH_MS) {
+            last_touch = now;
+            p_read_touch(points);
+        }
+
+        p_idle_poll();
         p_poll_battery(now);
     }
 
@@ -872,7 +1194,6 @@ static void v_run(void)
     }
 
     v_error = NULL;
-
     control(p_audio, AUDIO_CTRL_VOLUME, 80, 0);
 
     length = v_record();
@@ -892,12 +1213,12 @@ static void v_run(void)
         v_hint("No se ha grabado audio");
 }
 
-/* ----------------------------------------------------------
- * Archivos: utilidades
- * ---------------------------------------------------------- */
+/* ---------- FAT: utilidades ---------- */
 
-static void fm_text_fit(const char *text, int x, int y,
-                        int pixels, uint16_t fg, uint16_t bg)
+static void fm_text_fit(
+    const char *text, int x, int y,
+    int pixels, uint16_t fg, uint16_t bg
+)
 {
     char shown[64];
     size_t length = strlen(text);
@@ -910,7 +1231,6 @@ static void fm_text_fit(const char *text, int x, int y,
 
     if (limit >= sizeof(shown))
         limit = sizeof(shown) - 1U;
-
     if (limit == 0U)
         return;
 
@@ -936,28 +1256,25 @@ static void fm_message(const char *message)
     snprintf(fm_status, sizeof(fm_status), "%s", message);
 }
 
-static bool fm_join(const char *base, const char *name,
-                    char *result, size_t capacity)
+static bool fm_join(
+    const char *base, const char *name,
+    char *result, size_t capacity
+)
 {
     size_t a = strlen(base);
     size_t b = strlen(name);
-    bool slash = (a > 0U && base[a - 1U] != '/');
+    bool slash = a > 0U && base[a - 1U] != '/';
     size_t needed = a + (slash ? 1U : 0U) + b + 1U;
 
     if (a == 0U || needed > capacity)
         return false;
 
-    /*
-     * Los nombres deben ser elementos individuales,
-     * nunca rutas ni referencias al directorio superior.
-     */
     if (b == 0U ||
         strcmp(name, ".") == 0 ||
         strcmp(name, "..") == 0 ||
         strchr(name, '/') != NULL ||
-        strchr(name, '\\') != NULL) {
+        strchr(name, '\\') != NULL)
         return false;
-    }
 
     memcpy(result, base, a);
 
@@ -968,20 +1285,20 @@ static bool fm_join(const char *base, const char *name,
     return true;
 }
 
-static void fm_small_button(int x, int y, int width,
-                            const char *label, uint16_t color)
+static void fm_small_button(
+    int x, int y, int width,
+    const char *label, uint16_t color
+)
 {
-    int tx;
+    int tx = x + (
+        width - (int)strlen(label) * LCD_TEXT_W
+    ) / 2;
 
     p_round(x, y, width, 30, 10, color);
-
-    tx = x + (width - (int)strlen(label) * LCD_TEXT_W) / 2;
     p_text(label, tx, y + 7, P_INK, color);
 }
 
-/* ----------------------------------------------------------
- * Archivos: cargar una pagina
- * ---------------------------------------------------------- */
+/* ---------- FAT: listado ---------- */
 
 static bool fm_load(void)
 {
@@ -1014,9 +1331,8 @@ static bool fm_load(void)
 
     while (fl_readdir(&dir, &entry) == 0) {
         if (strcmp(entry.filename, ".") == 0 ||
-            strcmp(entry.filename, "..") == 0) {
+            strcmp(entry.filename, "..") == 0)
             continue;
-        }
 
         if (skipped < fm_offset) {
             ++skipped;
@@ -1042,42 +1358,41 @@ static bool fm_load(void)
     return true;
 }
 
-/* ----------------------------------------------------------
- * Archivos: dibujar
- * ---------------------------------------------------------- */
-
 static void fm_draw(void)
 {
     unsigned i;
     char text[64];
 
     p_rect(16, 122, 288, 308, P_BG);
-
     p_round(24, 124, 272, 26, 8, P_CARD);
+
     fm_text_fit(fm_path[0] ? fm_path : "/",
                 32, 130, 256, P_BLUE, P_CARD);
 
     for (i = 0U; i < fm_count; ++i) {
         int y = FM_LIST_Y + (int)i * FM_ROW_H;
-        bool selected = ((int)i == fm_selected);
-        uint16_t bg = selected ? P_VOICE_BG : P_CARD;
+        uint16_t bg = (int)i == fm_selected
+            ? P_VOICE_BG : P_CARD;
 
         p_round(24, y, 272, 34, 8, bg);
 
-        p_text(fm_entries[i].is_dir ? "DIR" : "FILE",
-               32, y + 9,
-               fm_entries[i].is_dir ? P_YELLOW : P_CYAN,
-               bg);
+        p_text(
+            fm_entries[i].is_dir ? "DIR" : "FILE",
+            32, y + 9,
+            fm_entries[i].is_dir ? P_YELLOW : P_CYAN,
+            bg
+        );
 
-        fm_text_fit(fm_entries[i].filename,
-                    32 + 5 * LCD_TEXT_W, y + 9,
-                    256 - 5 * LCD_TEXT_W, P_TEXT, bg);
+        fm_text_fit(
+            fm_entries[i].filename,
+            32 + 5 * LCD_TEXT_W, y + 9,
+            256 - 5 * LCD_TEXT_W, P_TEXT, bg
+        );
     }
 
-    if (fm_count == 0U) {
+    if (fm_count == 0U)
         p_center(fm_ready ? "Carpeta vacia" : "Sin acceso FAT",
                  218, P_MUTED, P_BG);
-    }
 
     if (fm_confirm) {
         fm_small_button(24, 350, 128, "CANCELAR", P_BLUE);
@@ -1086,11 +1401,11 @@ static void fm_draw(void)
         fm_text_fit("Borrar elemento seleccionado?",
                     24, 388, 272, P_PINK, P_BG);
 
-        if (fm_selected >= 0 &&
-            fm_selected < (int)fm_count) {
-            fm_text_fit(fm_entries[fm_selected].filename,
-                        24, 408, 272, P_TEXT, P_BG);
-        }
+        if (fm_selected >= 0 && fm_selected < (int)fm_count)
+            fm_text_fit(
+                fm_entries[fm_selected].filename,
+                24, 408, 272, P_TEXT, P_BG
+            );
 
         return;
     }
@@ -1098,7 +1413,6 @@ static void fm_draw(void)
     fm_small_button(24, 350, 82, "SUBIR", P_BLUE);
     fm_small_button(119, 350, 82, "ANT", P_BLUE);
     fm_small_button(214, 350, 82, "SIG", P_BLUE);
-
     fm_small_button(24, 386, 128, "CREAR DIR", P_GREEN);
     fm_small_button(168, 386, 128, "BORRAR", P_PINK);
 
@@ -1113,16 +1427,12 @@ static void fm_draw(void)
     }
 }
 
-/* ----------------------------------------------------------
- * Archivos: subir de directorio
- * ---------------------------------------------------------- */
+/* ---------- FAT: operaciones ---------- */
 
 static void fm_parent(void)
 {
     char *last;
-    size_t length;
-
-    length = strlen(fm_path);
+    size_t length = strlen(fm_path);
 
     while (length > 1U && fm_path[length - 1U] == '/')
         fm_path[--length] = '\0';
@@ -1139,10 +1449,6 @@ static void fm_parent(void)
     fm_load();
     fm_draw();
 }
-
-/* ----------------------------------------------------------
- * Archivos: crear directorio
- * ---------------------------------------------------------- */
 
 static void fm_create(void)
 {
@@ -1192,10 +1498,6 @@ static void fm_create(void)
     fm_draw();
 }
 
-/* ----------------------------------------------------------
- * Archivos: confirmacion y borrado
- * ---------------------------------------------------------- */
-
 static void fm_ask_delete(void)
 {
     if (!fm_ready ||
@@ -1206,9 +1508,10 @@ static void fm_ask_delete(void)
         return;
     }
 
-    if (!fm_join(fm_path,
-                 fm_entries[fm_selected].filename,
-                 fm_delete_path, sizeof(fm_delete_path))) {
+    if (!fm_join(
+            fm_path, fm_entries[fm_selected].filename,
+            fm_delete_path, sizeof(fm_delete_path)
+        )) {
         fm_message("Ruta demasiado larga o invalida");
         fm_draw();
         return;
@@ -1240,18 +1543,10 @@ static void fm_delete(void)
         fm_message("No se pudo eliminar el archivo");
     }
 
-    /*
-     * Recargar incluso si el elemento ya habia desaparecido.
-     * fm_load conserva el mensaje salvo error de acceso.
-     */
     fm_confirm = false;
     fm_load();
     fm_draw();
 }
-
-/* ----------------------------------------------------------
- * Archivos: acciones tactiles
- * ---------------------------------------------------------- */
 
 static void fm_tap(int x, int y)
 {
@@ -1274,18 +1569,16 @@ static void fm_tap(int x, int y)
         if (!p_inside(x, y, 24, row_y, 272, 34))
             continue;
 
-        /*
-         * Primer toque: seleccionar.
-         * Segundo toque sobre la misma carpeta: abrir.
-         */
         if (fm_selected == (int)i && fm_entries[i].is_dir) {
             char next[FS_PATH_MAX];
             FL_DIR check;
 
             if (!fs_mounted()) {
                 fm_message("No hay volumen FAT montado");
-            } else if (!fm_join(fm_path, fm_entries[i].filename,
-                                next, sizeof(next))) {
+            } else if (!fm_join(
+                    fm_path, fm_entries[i].filename,
+                    next, sizeof(next)
+                )) {
                 fm_message("Ruta demasiado larga o invalida");
             } else if (fl_opendir(next, &check) == NULL) {
                 fm_message("No se puede abrir la carpeta");
@@ -1358,15 +1651,7 @@ static void p_files(void)
     fm_draw();
 }
 
-/* ----------------------------------------------------------
- * Otras aplicaciones: demostraciones
- * ---------------------------------------------------------- */
-
-static void p_app_header(enum p_app app)
-{
-    p_text(p_names[app], 24, 68, P_TEXT, P_BG);
-    p_text("Vista de demostracion", 24, 94, P_MUTED, P_BG);
-}
+/* ---------- Aplicaciones de demostracion ---------- */
 
 static void p_music_control(void)
 {
@@ -1383,7 +1668,6 @@ static void p_music_control(void)
 static void p_music(void)
 {
     p_round(24, 128, 272, 174, 22, P_CARD);
-
     p_icon(P_MUSIC, 128, 144);
 
     p_center("Material Dreams", 225, P_TEXT, P_CARD);
@@ -1416,28 +1700,24 @@ static void p_note_content(void)
 static void p_notes(void)
 {
     p_round(24, 128, 272, 212, 22, P_YELLOW);
-
     p_text("Mi bloc", 42, 148, P_INK, P_YELLOW);
+
     p_note_content();
 
     p_text("Nota de ejemplo", 42, 304, P_INK, P_YELLOW);
-
     p_button(64, 364, 192, "CAMBIAR NOTA", P_YELLOW);
 }
 
 static void p_weather(void)
 {
     p_round(24, 128, 272, 184, 22, P_CYAN);
-
     p_text("Ciudad demo", 42, 148, P_INK, P_CYAN);
 
     p_round(126, 181, 68, 68, 34, P_YELLOW);
-
     p_text("24 C", 144, 208, P_INK, P_YELLOW);
     p_text("Cielo despejado", 100, 278, P_INK, P_CYAN);
 
     p_round(24, 332, 272, 70, 20, P_CARD);
-
     p_text("Humedad  45%", 42, 346, P_TEXT, P_CARD);
     p_text("Viento   8 km/h", 42, 373, P_MUTED, P_CARD);
 
@@ -1459,20 +1739,15 @@ static void p_settings_volume(void)
     char text[28];
 
     p_rect(40, 333, 240, 18, P_CARD);
-
-    snprintf(text, sizeof(text),
-             "Volumen demo: %d%%", p_volume);
-
+    snprintf(text, sizeof(text), "Volumen demo: %d%%", p_volume);
     p_text(text, 40, 333, P_TEXT, P_CARD);
 
     p_rect(40, 366, 240, 20, P_CARD);
-
     p_round(40, 373, 240, 6, 3, P_TRACK);
 
-    if (p_volume > 0) {
+    if (p_volume > 0)
         p_round(40, 373, p_volume * 240 / 100,
                 6, 3, p_accents[p_theme]);
-    }
 
     p_round(40 + p_volume * 224 / 100,
             368, 16, 16, 8, p_accents[p_theme]);
@@ -1502,56 +1777,48 @@ static void p_settings(void)
     p_settings_volume();
 }
 
-/* ----------------------------------------------------------
- * Navegacion: dibujar pagina actual
- * ---------------------------------------------------------- */
+/* ---------- Navegacion ---------- */
 
 static void p_render(void)
 {
     p_shell();
 
-    if (p_page == P_HOME) {
+    switch (p_page) {
+    case P_HOME:
         p_home();
         return;
-    }
 
-    if (p_page == P_VOICE) {
+    case P_VOICE:
         p_voice();
         return;
-    }
 
-    if (p_page == P_FILES) {
+    case P_FILES:
         p_files();
         return;
-    }
 
-    p_app_header(p_page);
+    default:
+        p_text(p_names[p_page], 24, 68, P_TEXT, P_BG);
+        p_text("Vista de demostracion", 24, 94, P_MUTED, P_BG);
+        break;
+    }
 
     switch (p_page) {
     case P_MUSIC:
         p_music();
         break;
-
     case P_NOTES:
         p_notes();
         break;
-
     case P_WEATHER:
         p_weather();
         break;
-
     case P_SETTINGS:
         p_settings();
         break;
-
     default:
         break;
     }
 }
-
-/* ----------------------------------------------------------
- * Navegacion: acciones tactiles
- * ---------------------------------------------------------- */
 
 static void p_tap(int x, int y)
 {
@@ -1577,7 +1844,6 @@ static void p_tap(int x, int y)
                 return;
             }
         }
-
         return;
     }
 
@@ -1587,10 +1853,10 @@ static void p_tap(int x, int y)
     }
 
     if (p_page == P_VOICE) {
-        if (p_inside(x, y,
-                     V_BTN_X, V_BTN_Y, V_BTN_W, V_BTN_H)) {
+        if (p_inside(x, y, V_BTN_X, V_BTN_Y,
+                     V_BTN_W, V_BTN_H))
             v_run();
-        }
+
         return;
     }
 
@@ -1608,57 +1874,60 @@ static void p_tap(int x, int y)
         return;
     }
 
-    if (p_page == P_SETTINGS) {
-        for (i = 0; i < 3; ++i) {
-            if (p_inside(x, y, 44 + i * 78, 170, 56, 36)) {
-                if (p_theme != i) {
-                    p_theme = i;
-                    p_render();
-                }
-                return;
-            }
-        }
+    if (p_page != P_SETTINGS)
+        return;
 
-        if (p_inside(x, y, 214, 240, 74, 48)) {
-            p_switch = !p_switch;
-            p_settings_switch();
+    for (i = 0; i < 3; ++i) {
+        if (p_inside(x, y, 44 + i * 78, 170, 56, 36)) {
+            if (p_theme != i) {
+                p_theme = i;
+                p_render();
+            }
             return;
         }
+    }
 
-        if (p_inside(x, y, 36, 358, 248, 40)) {
-            int value = (x - 40) * 100 / 240;
+    if (p_inside(x, y, 214, 240, 74, 48)) {
+        p_switch = !p_switch;
+        p_settings_switch();
+        return;
+    }
 
-            if (value < 0)
-                value = 0;
+    if (p_inside(x, y, 36, 358, 248, 40)) {
+        int value = (x - 40) * 100 / 240;
 
-            if (value > 100)
-                value = 100;
+        if (value < 0)
+            value = 0;
+        if (value > 100)
+            value = 100;
 
-            if (value != p_volume) {
-                p_volume = value;
-                p_settings_volume();
-            }
+        if (value != p_volume) {
+            p_volume = value;
+            p_settings_volume();
         }
     }
 }
 
-/* ----------------------------------------------------------
- * Tarea principal
- * ---------------------------------------------------------- */
+/* ---------- Tarea principal ---------- */
 
 int p4demoTask(void)
 {
     touch_point_t points[P_POINTS];
     bool touch_latched = false;
-    uint32_t release_count = 0U;
+    unsigned release_count = 0U;
+    bool touch_error_reported = false;
+
+    printf("p4demo: INICIO de tarea\n");
 
     p_lcd = getdev("/dev/lcd0");
     p_touch = getdev("/dev/touch0");
     p_power = getdev("/dev/power0");
     p_audio = getdev("/dev/audio0");
 
-    if (p_lcd == SYSERR || p_touch == SYSERR)
+    if (p_lcd == SYSERR || p_touch == SYSERR) {
+        printf("p4demo: LCD o touch no disponible\n");
         return 0;
+    }
 
     p_page = P_HOME;
     p_theme = 0;
@@ -1666,9 +1935,7 @@ int p4demoTask(void)
     p_switch = true;
     p_note = 0;
     p_volume = 60;
-
     p_battery = -1;
-    p_last_battery = clktotal;
 
     fm_path[0] = '\0';
     fm_delete_path[0] = '\0';
@@ -1680,32 +1947,92 @@ int p4demoTask(void)
     fm_selected = -1;
     fm_confirm = false;
 
+    /*
+     * Conservar reserva PSRAM existente.
+     * No permite ejecutar instancias concurrentes.
+     */
+    v_state = VOICE_IDLE;
+    v_last_hint[0] = '\0';
+    v_error = NULL;
+
+    p_screen_asleep = false;
+    p_ignore_touch = false;
+    p_ignore_release = 0U;
+
+    p_signal = -1;
+    p_link = esp_hosted_wifi_sta_is_connected();
+    p_wifi_shown = -100;
+    p_wifi_tries = 0U;
+
+    p_last_touch_ms = p_now();
+    p_last_battery = p_last_touch_ms;
+    p_last_wifi_ms = p_last_touch_ms;
+
+    if (control(p_lcd, LCD_CTRL_BACKLIGHT, 1, 0) == SYSERR) {
+        printf("p4demo: no se pudo encender backlight\n");
+        return 0;
+    }
+
     p_render();
     p_update_battery();
 
+    /*
+     * Mantiene el primer intento de RSSI del original.
+     * Puede bloquear segun wifiSignalRead().
+     */
+    p_update_wifi();
+
+    p_last_touch_ms = p_now();
+    p_last_battery = p_last_touch_ms;
+    p_last_wifi_ms = p_last_touch_ms;
+
+    //printf("p4demo: reposo tras %lu ms sin touch\n",
+           //(unsigned long)P_IDLE_MS);
+
     for (;;) {
-        int count = (int)read(p_touch, points, P_POINTS);
+        int count = p_read_touch(points);
 
         if (count > 0) {
+            touch_error_reported = false;
             release_count = 0U;
 
-            /*
-             * Una accion por pulsacion.
-             * Es necesario levantar el dedo entre acciones.
-             */
-            if (!touch_latched) {
+            if (p_ignore_touch || p_screen_asleep) {
+                touch_latched = true;
+            } else if (!touch_latched) {
                 touch_latched = true;
                 p_tap(points[0].x, points[0].y);
             }
         } else if (count == 0) {
+            touch_error_reported = false;
+
             if (release_count < P_RELEASE_MISS)
                 ++release_count;
 
             if (release_count >= P_RELEASE_MISS)
                 touch_latched = false;
+        } else {
+            release_count = 0U;
+
+            if (!touch_error_reported) {
+                printf("p4demo: error al leer touch\n");
+                touch_error_reported = true;
+            }
         }
 
-        p_poll_battery(clktotal);
+        p_poll_battery(p_now());
+
+        /*
+         * Evitar iniciar un RPC potencialmente bloqueante
+         * mientras se esta manteniendo un gesto tactil.
+         */
+        if (!touch_latched && count == 0)
+            p_poll_wifi(p_now());
+
+        p_idle_poll();
+
+        /* Unidad de sleep(): la definida por tu kernel. */
         sleep(P_POLL);
     }
+
+    return 0;
 }

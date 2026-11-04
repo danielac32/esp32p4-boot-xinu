@@ -72,6 +72,19 @@
 
 /* ======================================================================
  * ESP32-C6 coprocessor (WiFi6, SDMMC SLOT1 via GPIO matrix)
+ *
+ * Verified against the vendor schematic (Waveshare
+ * ESP32-P4-WIFI6-Touch-LCD-3.5-schematic.pdf, U1 = ESP32-C6FH8): the C6's
+ * SDIO-slave pads come out as package pins 24/23 (SDIO_CLK/SDIO_CMD) and
+ * 29..26 (SDIO_DATA3..DATA0), and those wires are net-named GPIO18, GPIO19
+ * and GPIO17..GPIO14 — i.e. the P4 pins below.  The slave's own IOMUX is a
+ * contiguous block too (SDK soc/sdio_slave_pins.h: CMD=18, CLK=19, D0..D3 =
+ * 20..23 on the C6), so the wiring is D0..D3 straight across, no swap.
+ * DAT0..DAT3 additionally carry 51k pull-ups to ESP_3V3 (R15..R18) and the
+ * reset/strap levers are series 0R (R54 -> CHIP_PU, R52 -> GPIO2), exactly
+ * as assumed.  Slot 1 has no IOMUX pins on the P4, so all six lines must be
+ * matrix-routed; 51k on the data lines is why the CMD53 data phase is worth
+ * sweeping down to 400 kHz (`wifi slow`) before blaming the wire.
  * ====================================================================== */
 #define C6_SDIO_CLK         18
 #define C6_SDIO_CMD         19

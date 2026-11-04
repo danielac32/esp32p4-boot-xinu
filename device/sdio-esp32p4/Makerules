@@ -8,15 +8,17 @@ COMP = device/sdio-esp32p4
 # ESP32-C6 en el slot 1 del controlador SDMMC compartido.  W2: el transporte
 # esp_hosted, copiado VERBATIM del proyecto baremetal de referencia
 # (/home/daniel/esp32-riscv-bare-metal-sdk-main/drivers/esp_hosted):
-#   espHostedSdio.c  <- drivers/esp_hosted/esp_hosted_sdio.c (motor SDIO slot 1)
-#   espHosted.c      <- drivers/esp_hosted/esp_hosted.c      (cola RX + despacho)
-#   sdmmcPeriph.c    <- core/soc/esp32p4/sdmmc_periph.c      (tablas de pad/seno)
+#   espHostedSdio.c    <- drivers/esp_hosted/esp_hosted_sdio.c (motor SDIO slot 1)
+#   espHosted.c        <- drivers/esp_hosted/esp_hosted.c      (cola RX + despacho)
+#   espHostedCtrl.c    <- drivers/esp_hosted/esp_hosted_ctrl.c (RPC de control:
+#                         version del C6, modo WiFi, SSID/clave, connect, MAC)
+#   sdmmcPeriph.c      <- core/soc/esp32p4/sdmmc_periph.c      (tablas de pad/seno)
 # sdioFn1.c fue el intento propio de W2; queda como diagnostico, ya no es el
 # camino de datos.  Nada de aqui es aun un device del devtab: reutiliza el
 # motor de comandos del host en device/sdmmc-esp32p4 y el candado compartido
 # del bus (system/sdmmcbus.c), porque el slot 0 (microSD/FAT) es el mismo
 # bloque DesignWare.
-C_FILES = sdioProbe.c sdioFn1.c espHostedSdio.c espHosted.c sdmmcPeriph.c
+C_FILES = sdioProbe.c sdioFn1.c espHostedSdio.c espHosted.c espHostedCtrl.c sdmmcPeriph.c
 S_FILES =
 
 # Add the files to the compile source path

@@ -21,21 +21,38 @@ OBJDUMP := $(CROSS)objdump
 READELF := $(CROSS)readelf
 NM      := $(CROSS)nm
 
-# Las mismas marchas del kernel (compile/platforms/esp32p4/platformVars:12)
-MARCH := -march=rv32imafc_zicsr_zifencei -mabi=ilp32f
+# Las marchas del kernel (compile/platforms/esp32p4/platformVars:12), MENOS la 'c'.
+#
+# La 'c' se quita a proposito: es lo que decidio el fallo medido en placa.  Con
+# instrucciones comprimidas una de 4 bytes puede caer en direccion 2-mod-4 (visto
+# en .text.startup.main: un 'sw' comprimido de 2 bytes en 0x8 deja el 'addi' que
+# lleva R_RISCV_LO12_I en 0x0a, y la seccion sale con sh_addralign=2).  El parche
+# del cargador escribe una palabra de 32 bits, y ese lw/sw en 0x...a seria
+# 'load/store address misaligned'.  Sin 'c' toda instruccion mide 4, las secciones
+# salen alineadas a 4 y el parche por palabra es correcto.  Un app CON comprimidas
+# tambien se podria: habria que parchear por medias palabras, que el campo imm de
+# un I-type cabe entero en la mitad alta y en un U-type se reparte 12/16.
+MARCH := -march=rv32imaf_zicsr_zifencei -mabi=ilp32f
 
 # -mno-relax no es de adorno: explica por que el cargador puede ser simple.  Con
 # relaxation aparecen R_RISCV_RELAX/R_RISCV_ALIGN y el par HI20/LO12 puede
 # encogerse a instruccion comprimida, de modo que parchear la palabra vecina ya no
-# sirve.  -G0 no se usa porque este GCC (riscv32-unknown-elf 16.1) no lo
-# reconoce; en la practica tampoco salen .sdata/.sbss, asi que no hace falta
-# calcular __global_pointer$ ni cargar gp antes de saltar.  Si algn dia
-# aparecen, hay que tratarlo: gp mal puesto = load address misaligned.
+# sirve.
+#
+# -msmall-data-limit=0 es el nombre real de lo que se pedia como '-G0' (este GCC
+# 16.1 la rechaza: 'error: unrecognized command-line option -G0', medido).  Sin el
+# limite a cero, CUALQUIER
+# estatica de menos de 8 bytes se va a .sdata/.srodata relativa a gp y arrastra
+# R_RISCV_LO12_S, que el cargador no aplica: medido con 'static int contador' en
+# app.c -> .sdata + 1x LO12_S.  Con el limite a cero todo lo absoluto va por
+# HI20+LO12_I, no hay que calcular __global_pointer$ ni cargar gp antes de saltar,
+# y la lista de tipos vuelve a ser la que el cargador cubre.
 CFLAGS := $(MARCH) -Os -ffreestanding -nostdinc -nostdlib -fno-pic -fno-builtin \
           -fno-strict-aliasing -fno-common -ffunction-sections \
-          -mno-relax -Wall
+          -msmall-data-limit=0 -mno-relax -Wall
 
-OBJS := start.o app.o helper.o
+OBJS := start.o app.o              # helper.o fuera: el selftest no llama a nada
+                                      # de otra unidad (su app.c lo declara asi).
 
 all: app.elf app_elf.h verify
 

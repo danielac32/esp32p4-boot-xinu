@@ -61,6 +61,15 @@
  * GPIO_BASE + 0x158 + 4*s (s = índice de señal).  Campos: IN_SEL[5:0],
  * INV[6], SIG_IN_SEL[7] (1 = la señal se toma de la matriz, no del IOMUX). */
 #define GPIO_IN_SEL_CFG(sig)    (GPIO_BASE + 0x158UL + 4UL * (sig))
+
+/* LP_IOMUX (DR_REG_LP_IOMUX_BASE = 0x50120000 + 0xB000) cubre los pads
+ * GPIO0..GPIO15: pad n en +0x08 + 4n, y el bit 4 de ese registro es MUX_SEL, el
+ * dueño del pad (1 = GPIO de bajo poder, 0 = GPIO digital).  Ver el comentario de
+ * sdioPadToMatrix. */
+#define IO_MUX_LP_BASE          0x5012B000UL
+#define IO_MUX_LP_PAD_REG(n)    (IO_MUX_LP_BASE + 0x08UL + 4UL * (n))
+#define IO_MUX_LP_MUX_SEL       (1UL << 4)
+#define IO_MUX_LAST_LP_PAD      15U
 #define O_SEL_MASK              0x1FFU          /* OUT_SEL[8:0]          */
 #define O_OEN_SEL               (1UL << 10)     /* OEN_SEL: 1 = GPIO_ENABLE */
 #define I_SEL_MASK              0x3FU           /* IN_SEL[5:0]           */
@@ -108,11 +117,35 @@
  * Dejar un pad del C6 en la matriz GPIO: MCU_SEL=GPIO, entrada habilitada
  * y 40 mA (igual que el slot 0 nativo, salvo el enrutado).  CMD y DAT llevan
  * pull-up para que un bus en reposo lea alto; CLK no.
+ *
+ * Antes hay que quitarle el pad al otro dueño.  En el P4 los pads GPIO0..15
+ * tienen dos registros de configuración: el IO_MUX de alta potencia
+ * (IO_MUX_BASE + 4 + 4n, el que maneja esta función) y el IO_MUX de bajo poder
+ * LP_IOMUX (0x5012B000 + 8 + 4n), y el bit 4 del segundo --MUX_SEL, "1: use LP
+ * GPIO, 0: use digital GPIO" en
+ * core/soc/esp32p4/register/hw_ver3/soc/lp_iomux_reg.h-- decide cual de los dos
+ * manda el pad.  Tras el arranque viene en 1 para el 14 y para el 15, medido por
+ * `wifi hold` (LP_PAD14=0x0000001a, LP_PAD15=0x0000041a).  Con ese bit puesto,
+ * todo lo que se escriba en IO_MUX_GPIO14_REG o en FUNC_OUT_SEL_CFG[14] queda
+ * anotado en el registro HP pero NO llega al pad: esa es la razon por la que D0
+ * estaba clavado a 0, D1 clavado a 1 y ningun CMD53 veia un solo bit, mientras
+ * los pads 16..19 --que no tienen registro LP, LP_IOMUX solo cubre 0..15--
+ * obedecian a la primera.  Solamente se limpia ese bit, y solo para el pad que
+ * esta funcion esta enrutando: los demas campos del registro LP (pulls, drive,
+ * receptor y las configuraciones de sueño) quedan intactos, y el pad pasa a
+ * gobernarlo desde aqui el IO_MUX digital.
  */
 static void sdioPadToMatrix(uint8 pin, bool pullup)
 {
     volatile uint32 *pad = (volatile uint32 *)IO_MUX_PIN_REG(IO_MUX_BASE, pin);
     uint32 val = *pad;
+
+    if (pin <= IO_MUX_LAST_LP_PAD)
+    {
+        volatile uint32 *lp = (volatile uint32 *)IO_MUX_LP_PAD_REG(pin);
+
+        *lp = *lp & ~IO_MUX_LP_MUX_SEL;     /* el pad pasa al dominio digital  */
+    }
 
     val &= ~(IO_MCU_SEL_MASK | IO_FUN_WPD | IO_FUN_WPU | IO_FUN_DRV_MASK);
     val |= IO_MCU_SEL_GPIO | IO_FUN_IE | IO_FUN_DRV_40MA;
@@ -235,6 +268,45 @@ void sdioC6HoldReset(void)
     gpio_set_dir(C6_RESET, GPIO_OUTPUT);
     gpio_write(C6_RESET, FALSE);
     delay_ms(2);
+}
+
+/**
+ * Foto de las patas del slot 1 leida del propio puerto GPIO (no de ningun
+ * cache) mas el bit de "ocupada" del bloque.
+ */
+static void sdioPadSnapshot(const char *tag)
+{
+    uint32 st = *(volatile uint32 *)(sdHostRegBase() + H_STATUS);
+
+    kprintf("  patas %-13s D0=%u D1=%u D2=%u D3=%u CLK=%u CMD=%u  "
+            "data_busy=%u\r\n", tag,
+            (unsigned)gpio_read(C6_SDIO_D0), (unsigned)gpio_read(C6_SDIO_D1),
+            (unsigned)gpio_read(C6_SDIO_D2), (unsigned)gpio_read(C6_SDIO_D3),
+            (unsigned)gpio_read(C6_SDIO_CLK), (unsigned)gpio_read(C6_SDIO_CMD),
+            (unsigned)((st >> 9) & 1U));
+}
+
+/**
+ * Ver sdioPadProbe() en sdio.h: separar lo que conduce el C6 de lo que
+ * conduce la placa, reteniendo al C6 en reset entre dos fotos.
+ */
+void sdioPadProbe(void)
+{
+    /* Las patas hay que enrutarlas antes de leerlas: sin MCU_SEL=GPIO y sin
+     * entrada habilitada, GPIO_IN no refleja la linea y la foto mentiria. */
+    sdioPadsInit();
+    delay_ms(2);
+
+    sdioPadSnapshot("en reposo");
+
+    gpio_set_dir(C6_RESET, GPIO_OUTPUT);
+    gpio_write(C6_RESET, FALSE);          /* CHIP_PU abajo: C6 en reset */
+    delay_ms(50);
+    sdioPadSnapshot("C6 en reset");
+
+    gpio_write(C6_RESET, TRUE);           /* liberar                    */
+    delay_ms(1500);
+    sdioPadSnapshot("C6 liberado");
 }
 
 /**

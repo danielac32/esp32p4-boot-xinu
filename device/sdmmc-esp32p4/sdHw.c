@@ -718,8 +718,11 @@ bool sdSendCmdSlot(uint32_t slot, uint idx, uint32_t arg, uint resp, bool crc,
     SD_REG(SDHOST_RINTSTS) = SD_IRQ_ALL;
     SD_REG(SDHOST_CMDARG) = arg;
 
+    /* CMD[13] wait_complete se puede inhibir desde el diagnostico: con el
+     * esclavo afirmando DAT0, ese bit deja el comando cargado pero sin enviar
+     * (ni error ni timeout).  En operacion normal va puesto, como siempre. */
     cmd = (uint32_t)(idx & SD_CMD_INDEX_MASK)
-          | SD_CMD_WAIT_COMPLETE | SD_CMD_USE_HOLD
+          | (sd_xfer_no_wait ? 0U : SD_CMD_WAIT_COMPLETE) | SD_CMD_USE_HOLD
           | ((slot & 0x1FU) << SD_CMD_CARD_NUM_POS);
     if (send_init)
     {
@@ -1043,6 +1046,78 @@ void sdBlockCopyIn(const void *src, uint bytes)
     memcpy(sd_bounce, src, bytes);
 }
 
+/* ------------------------------------------------------------------ */
+/* Traza de la fase de datos (diagnostico del CMD53)                   */
+/* ------------------------------------------------------------------ */
+/* Apagada por defecto: la enciende el comando de shell que investiga el
+ * CMD53 del slot 1.  Con el flag a 0 solo cuesta una comparacion por punto,
+ * asi que el camino normal (microSD y transporte esp_hosted) no cambia.
+ *
+ * Todo lo que imprime se lee del periferico EN ESE INSTANTE: registros del
+ * bloque y nivel de las patas del slot 1 por la matriz de GPIO.  Eso es lo
+ * que separa "el motor no movio nada" de "el motor movio y el slave no
+ * condujo", que es justo la duda que deja el fallo con SBE|EBE. */
+uint32_t sd_xfer_trace;
+uint32_t sd_xfer_r5[4];             /* RESP0..RESP3 del ultimo CMD_DONE */
+
+/**
+ * Diagnostico: 1 = NO poner CMD[13] (wait_complete) al enviar comandos.
+ *
+ * CMD[13]=1 significa "no envies el comando hasta que la transferencia de
+ * datos anterior haya terminado".  El arbol ya tiene medido que con el esclavo
+ * afirmando DAT0 (funcion ocupada, data_busy=1) ese bit inhibe el comando
+ * interno "update clock": el CMD_START se auto-limpia y el comando no sale
+ * jamas, sin error ni timeout del CIU (sdSetClockSlotNoWait existe por eso).
+ * El mismo mecanismo puede estar bloqueando el CMD53 que hace falta para
+ * liberar ese DAT0, que es un lazo cerrado.
+ *
+ * Vive aqui, y no en la capa SDIO, porque el bit es del motor de comandos.
+ * Con el flag a 0 el camino normal no cambia.
+ */
+uint32_t sd_xfer_no_wait;
+
+/* GPIO_IN: nivel presente en cada pata (una pata sin entrada habilitada lee
+ * 0).  El slot 1 del C6 esta en GPIO14..19: 14=D0 15=D1 16=D2 17=D3 18=CLK
+ * 19=CMD. */
+#define SD_GPIO_IN_REG (GPIO_BASE + 0x3CUL)
+
+/** Volcar el estado del motor de datos y de las patas del slot 1. */
+static void sdXferDump(const char *tag)
+{
+    uint32_t ids   = SD_REG(SDHOST_IDSTS);
+    uint32_t st    = SD_REG(SDHOST_STATUS);
+    uint32_t pines = *(volatile uint32_t *)SD_GPIO_IN_REG;
+
+    kprintf("  [xdma] %s\r\n", tag);
+    kprintf("    CTRL=0x%08x BMOD=0x%08x IDINTEN=0x%08x DBADDR=0x%08x "
+            "FIFOTH=0x%08x\r\n",
+            SD_REG(SDHOST_CTRL), SD_REG(SDHOST_BMOD), SD_REG(SDHOST_IDINTEN),
+            SD_REG(SDHOST_DBADDR), SD_REG(SDHOST_FIFOTH));
+    kprintf("    IDSTS=0x%08x fsm=%u  RINTSTS=0x%08x  STATUS=0x%08x  "
+            "TMOUT=0x%08x\r\n",
+            ids, SD_IDSTS_FSM(ids), SD_REG(SDHOST_RINTSTS), st,
+            SD_REG(SDHOST_TMOUT));
+    kprintf("    data_busy=%u dat_path=%u resp_idx=%u fifo_cnt=%u "
+            "BLKSIZ=%u BYTCNT=%u\r\n",
+            (st & SD_STATUS_DATA_BUSY) ? 1U : 0U,
+            (st & SD_STATUS_DAT_PATH_BUSY) ? 1U : 0U,
+            (uint32_t)((st & SD_STATUS_RESP_IDX_MASK)
+                       >> SD_STATUS_RESP_IDX_POS),
+            (uint32_t)((st & SD_STATUS_FIFO_COUNT_MASK)
+                       >> SD_STATUS_FIFO_COUNT_POS),
+            SD_REG(SDHOST_BLKSIZ), SD_REG(SDHOST_BYTCNT));
+    kprintf("    TCBCNT=%u TBBCNT=%u  desc: ctrl=0x%08x sizes=0x%08x "
+            "buf=0x%08x next=0x%08x\r\n",
+            SD_REG(SDHOST_TCBCNT), SD_REG(SDHOST_TBBCNT),
+            (uint32_t)sd_desc->ctrl, (uint32_t)sd_desc->sizes,
+            (uint32_t)sd_desc->buffer, (uint32_t)sd_desc->next);
+    /* CLK es solo salida en el slot 1 (su entrada no esta enrutada), asi que
+     * no se imprime: mentiria.  Las otras cinco si se muestrean. */
+    kprintf("    patas: D0=%u D1=%u D2=%u D3=%u CMD=%u\r\n",
+            (pines >> 14) & 1U, (pines >> 15) & 1U, (pines >> 16) & 1U,
+            (pines >> 17) & 1U, (pines >> 19) & 1U);
+}
+
 /**
  * Devolver el camino de datos del bloque a un estado neutro cuando una
  * transferencia del slot 1 falla a mitad.
@@ -1141,6 +1216,11 @@ bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
         }
     }
 
+    if (sd_xfer_trace)
+    {
+        sdXferDump("antes de armar (limpieza hecha)");
+    }
+
     /* Armar el motor: fetch de descriptor, sus interrupciones (RI/TI es como
      * se escucha el fin), burst fijo, y el poll demand que lo pone a leer el
      * descriptor. */
@@ -1159,9 +1239,14 @@ bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
     SD_REG(SDHOST_DBADDR) = (uint32_t)(uintptr_t)_sd_desc_page;
     SD_REG(SDHOST_PLDMND) = 1;
 
+    if (sd_xfer_trace)
+    {
+        sdXferDump("descriptor armado (PLDMND)");
+    }
+
     cmdval = (uint32_t)(idx & SD_CMD_INDEX_MASK)
              | SD_CMD_RESP_EXPECT | SD_CMD_RESP_CRC | SD_CMD_DATA_EXPECTED
-             | SD_CMD_WAIT_COMPLETE | SD_CMD_USE_HOLD
+             | (sd_xfer_no_wait ? 0U : SD_CMD_WAIT_COMPLETE) | SD_CMD_USE_HOLD
              | ((slot & 0x1FU) << SD_CMD_CARD_NUM_POS);
     if (write)
     {
@@ -1174,6 +1259,11 @@ bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
         sd_hwerr = SD_HWERR_INHIBIT | SD_REG(SDHOST_RINTSTS);
         sdDataAbort();
         return FALSE;
+    }
+
+    if (sd_xfer_trace)
+    {
+        sdXferDump("comando tomado (CMD_START despejo)");
     }
 
     /* El comando se acepta primero (CMD_DONE, sin comprobar R1: es SDIO); el
@@ -1192,11 +1282,31 @@ bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
         }
         if (raw & SD_IRQ_CMD_DONE)
         {
+            if (sd_xfer_trace)
+            {
+                /* R5 de CMD52/CMD53: el byte de dato va en [7:0] y los flags
+                 * en [11:8] (COM_CRC_ERR, ILLEGAL_COMMAND, GEN_ERR, rsv);
+                 * [31:16] repite la RCA.  Un R5 con flags != 0 significa que
+                 * el slave RECHAZO el comando, y entonces no habra dato. */
+                sd_xfer_r5[0] = SD_REG(SDHOST_RESP(0));
+                sd_xfer_r5[1] = SD_REG(SDHOST_RESP(1));
+                sd_xfer_r5[2] = SD_REG(SDHOST_RESP(2));
+                sd_xfer_r5[3] = SD_REG(SDHOST_RESP(3));
+                kprintf("  [xdma] CMD_DONE RINTSTS=0x%08x  R5=%08x %08x %08x "
+                        "%08x -> flags=0x%x data=0x%02x\r\n",
+                        raw, sd_xfer_r5[0], sd_xfer_r5[1], sd_xfer_r5[2],
+                        sd_xfer_r5[3], (sd_xfer_r5[0] >> 8) & 0xFU,
+                        sd_xfer_r5[0] & 0xFFU);
+            }
             SD_REG(SDHOST_RINTSTS) = raw & ~SD_IRQ_DATA_OVER;
             break;
         }
         if (sdTimedOut(t0, SD_TO_CMD_MS))
         {
+            if (sd_xfer_trace)
+            {
+                sdXferDump("fin: timeout de comando (sin CMD_DONE)");
+            }
             SD_REG(SDHOST_RINTSTS) = SD_IRQ_ALL;
             sd_hwerr = SD_HWERR_TIMEOUT | raw;
             sdDataAbort();
@@ -1207,6 +1317,10 @@ bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
     /* Después el bloque: RI/TI dice que el descriptor terminó; DATA_OVER que
      * el dispositivo ya soltó el bus. */
     t0 = sdNow();
+    if (sd_xfer_trace)
+    {
+        sdXferDump("entrada del bucle de datos");
+    }
     for (;;)
     {
         ids = SD_REG(SDHOST_IDSTS);
@@ -1214,17 +1328,52 @@ bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
 
         if ((ids & SD_IDSTS_ERR_MASK) != 0 || (raw & SD_DATA_ERR_MASK) != 0)
         {
+            if (sd_xfer_trace)
+            {
+                sdXferDump("fin: error de dato/descriptor");
+            }
             sd_hwerr = SD_HWERR_DMA | ids | (raw & SD_DATA_ERR_MASK);
             break;
         }
         if ((ids & done) != 0 && (raw & SD_IRQ_DATA_OVER) != 0)
         {
+            /* La prueba de que ESTE bloque cruzó no es DAT0, son los dos
+             * contadores del motor: TCBCNT (lado tarjeta) y TBBCNT (lado
+             * memoria).  Se leen ANTES de limpiar IDSTS porque el reset del
+             * descriptor los reinicia, y con ellos se decide sin mirar
+             * ninguna cache del driver. */
+            uint32_t tcbcnt = SD_REG(SDHOST_TCBCNT);
+            uint32_t tbbcnt = SD_REG(SDHOST_TBBCNT);
+
+            if (sd_xfer_trace)
+            {
+                sdXferDump("fin: descriptor y DATA_OVER");
+            }
             SD_REG(SDHOST_RINTSTS) = raw;
             SD_REG(SDHOST_IDSTS) = ids;
             SD_REG(SDHOST_BMOD) = 0;
             SD_REG(SDHOST_CTRL) &= ~(SD_CTRL_DMA_ENABLE
                                      | SD_CTRL_USE_INTERNAL_DMA);
             SD_REG(SDHOST_IDINTEN) = 0;
+
+            /* Slot 1 (C6): el esclavo deja DAT0 afirmado mientras le quede un
+             * paquete en la cola C2H; eso es data_busy del SLOT, no de esta
+             * transferencia, y esperarlo hace fallar un CMD53 que sí movió
+             * sus bytes (medido: TCBCNT=4/TBBCNT=4 con data_busy=1).  Se
+             * acepta si los contadores confirman exactamente bytcnt; si no,
+             * sigue siendo un fallo. */
+            if (slot == 1U)
+            {
+                if (tcbcnt != bytcnt || tbbcnt != bytcnt)
+                {
+                    sd_hwerr = SD_HWERR_TIMEOUT | SD_REG(SDHOST_STATUS);
+                    return FALSE;
+                }
+                return TRUE;
+            }
+
+            /* Slot 0 (microSD): aquí DAT0 a bajo sí significa que la tarjeta
+             * sigue programando el bloque, así que la espera es vinculante. */
             if (!sdWaitDataIdle())
             {
                 sd_hwerr = SD_HWERR_TIMEOUT | SD_REG(SDHOST_STATUS);
@@ -1245,6 +1394,10 @@ bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
         }
         if (sdTimedOut(t0, SD_TO_DATA_MS))
         {
+            if (sd_xfer_trace)
+            {
+                sdXferDump("fin: timeout del bucle de datos");
+            }
             sd_hwerr = SD_HWERR_TIMEOUT | ids;
             break;
         }
@@ -1254,4 +1407,192 @@ bool sdTransferSlot(uint32_t slot, uint idx, uint32_t arg, uint32_t bytcnt,
      * la microSD (slot 0) no herede el motor a medio armar. */
     sdDataAbort();
     return FALSE;
+}
+
+/* ------------------------------------------------------------------ */
+/* Fase de datos en modo PIO: el mismo CMD53 sin IDMAC                  */
+/* ------------------------------------------------------------------ */
+/* Palabras y bytes que realmente salieron/entraron por el FIFO en el ultimo
+ * paso PIO.  Es la medida que parte la duda: con palabras=0 el esclavo no
+ * condujo ni un bit (capa fisica o muestreo); con palabras>0 el dato llego al
+ * bloque y lo que no lo sacaba era el IDMAC/descriptor. */
+uint32_t sd_pio_words;
+uint32_t sd_pio_bytes;
+
+/** Palabras de 32 bits en el FIFO ahora mismo (STATUS[29:17]). */
+static uint32_t sdFifoWords(void)
+{
+    return (SD_REG(SDHOST_STATUS) & SD_STATUS_FIFO_COUNT_MASK)
+           >> SD_STATUS_FIFO_COUNT_POS;
+}
+
+/**
+ * Fase de datos de un comando SDIO movida palabra a palabra por el puerto
+ * BUFFIFO (0x200), con el IDMAC APAGADA y sin descriptor.
+ *
+ * El camino de comandos ya esta probado (todos los CMD52 responden); el IDMAC
+ * del slot 1 nunca cruzo un byte.  Aqui no hay descriptor, ni DBADDR, ni pagina
+ * en PSRAM, ni rebote: el CPU saca los bytes directamente del FIFO del bloque,
+ * asi que la transferencia depende solo del CIU de datos y de las patas.
+ *
+ * Es una entrada nueva: sdTransferSlot y el slot 0 no se tocan.  El IDMA se
+ * apaga para este paso y cada camino (sdDmaBlock/sdTransferSlot) vuelve a
+ * armarlo al entrar, de modo que la microSD no hereda el bloque en PIO.  Al
+ * salir se deja el FIFO reseteado para no tirar restos al siguiente comando.
+ */
+bool sdTransferPio(uint32_t slot, uint idx, uint32_t arg, uint8_t *buf,
+                   uint32_t bytcnt, uint32_t blksiz, bool write)
+{
+    uint32_t cmdval;
+    uint32_t raw;
+    uint32_t t0;
+    uint32_t words = (bytcnt + 3U) / 4U;   /* palabras del bloque  */
+    uint32_t got = 0U;                     /* sacadas del FIFO     */
+    uint32_t put = 0U;                     /* metidas en el FIFO   */
+    uint32_t done = 0U;
+
+    sd_pio_words = 0U;
+    sd_pio_bytes = 0U;
+    sd_hwerr = 0U;
+
+    if (bytcnt == 0 || bytcnt > SD_BLOCK_SIZE || blksiz == 0 || buf == NULL)
+    {
+        sd_hwerr = SD_HWERR_ERR;
+        return FALSE;
+    }
+
+    /* IDMAC apagada: sin CTRL[5] (dma_enable) ni CTRL[25] (use_internal_dma),
+     * sin BMOD y sin interrupciones de descriptor.  El bloque queda en "el CPU
+     * mueve el dato". */
+    SD_REG(SDHOST_CTRL) &= ~(SD_CTRL_DMA_ENABLE | SD_CTRL_USE_INTERNAL_DMA);
+    SD_REG(SDHOST_BMOD) = 0U;
+    SD_REG(SDHOST_IDINTEN) = 0U;
+
+    /* Limpieza previa, con la misma regla que el slot 1 de sdTransferSlot: en
+     * el C6 el data_busy es legitimo (paquete C2H sin leer), asi que no se
+     * exige antes de lanzar. */
+    (void)sdWaitDataIdle();
+    if (!sdWaitCmdTaken() || !sdFifoReset())
+    {
+        sd_hwerr = SD_HWERR_INHIBIT | SD_REG(SDHOST_STATUS);
+        return FALSE;
+    }
+    SD_REG(SDHOST_RINTSTS) = SD_IRQ_ALL;
+    SD_REG(SDHOST_IDSTS) = SD_IDSTS_ALL;
+
+    SD_REG(SDHOST_BLKSIZ) = blksiz;
+    SD_REG(SDHOST_BYTCNT) = bytcnt;
+    SD_REG(SDHOST_CMDARG) = arg;
+
+    if (sd_xfer_trace)
+    {
+        sdXferDump("pio: antes del comando");
+    }
+
+    cmdval = (uint32_t)(idx & SD_CMD_INDEX_MASK)
+             | SD_CMD_RESP_EXPECT | SD_CMD_RESP_CRC | SD_CMD_DATA_EXPECTED
+             | (sd_xfer_no_wait ? 0U : SD_CMD_WAIT_COMPLETE) | SD_CMD_USE_HOLD
+             | ((slot & 0x1FU) << SD_CMD_CARD_NUM_POS);
+    if (write)
+    {
+        cmdval |= SD_CMD_RW;
+    }
+    SD_REG(SDHOST_CMD) = cmdval | SD_CMD_START;
+
+    if (!sdWaitCmdTaken())
+    {
+        sd_hwerr = SD_HWERR_INHIBIT | SD_REG(SDHOST_RINTSTS);
+        sdDataAbort();
+        return FALSE;
+    }
+
+    t0 = sdNow();
+    for (;;)
+    {
+        raw = SD_REG(SDHOST_RINTSTS);
+
+        if (raw & SD_CMD_ERR_MASK)
+        {
+            sd_hwerr = SD_HWERR_ERR | (raw & SD_CMD_ERR_MASK);
+            break;
+        }
+        /* En PIO los errores de dato son del CIU (start/end bit, CRC, timeout
+         * de dato): aqui no hay descriptor al que echarle la culpa. */
+        if (raw & SD_DATA_ERR_MASK)
+        {
+            sd_hwerr = SD_HWERR_DMA | (raw & SD_DATA_ERR_MASK);
+            break;
+        }
+
+        if (!write)
+        {
+            while (got < words && sdFifoWords() != 0U)
+            {
+                uint32_t w = SD_REG(SDHOST_BUFFIFO);
+                uint32_t off = got * 4U;
+                uint32_t n = bytcnt - off;
+                uint32_t k;
+
+                if (n > 4U)
+                {
+                    n = 4U;
+                }
+                for (k = 0U; k < n; k++)
+                {
+                    buf[off + k] = (uint8_t)(w >> (8U * k));
+                }
+                got++;
+            }
+        }
+        else
+        {
+            while (put < words
+                   && (SD_REG(SDHOST_STATUS) & SD_STATUS_FIFO_FULL) == 0U)
+            {
+                uint32_t off = put * 4U;
+                uint32_t w = 0U;
+                uint32_t k;
+
+                for (k = 0U; k < 4U && off + k < bytcnt; k++)
+                {
+                    w |= (uint32_t)buf[off + k] << (8U * k);
+                }
+                SD_REG(SDHOST_BUFFIFO) = w;
+                put++;
+            }
+        }
+
+        /* DATA_OVER con el FIFO servido: el bloque cruzo por el camino del CPU. */
+        if ((raw & SD_IRQ_DATA_OVER) != 0U && ((write ? put : got) == words))
+        {
+            done = 1U;
+            break;
+        }
+        if (sdTimedOut(t0, SD_TO_DATA_MS))
+        {
+            sd_hwerr = SD_HWERR_TIMEOUT | raw;
+            break;
+        }
+    }
+
+    sd_pio_words = write ? put : got;
+    sd_pio_bytes = sd_pio_words * 4U;
+    if (sd_pio_bytes > bytcnt)
+    {
+        sd_pio_bytes = bytcnt;
+    }
+
+    SD_REG(SDHOST_RINTSTS) = SD_IRQ_ALL;
+    if (sd_xfer_trace)
+    {
+        sdXferDump(done != 0U ? "pio: DATA_OVER con el FIFO servido"
+                              : "pio: fin sin DATA_OVER completo");
+    }
+    if (done == 0U)
+    {
+        sdDataAbort();
+        return FALSE;
+    }
+    (void)sdFifoReset();                /* tirar el relleno de la ultima palabra */
+    return TRUE;
 }

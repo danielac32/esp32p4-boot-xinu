@@ -1,0 +1,18 @@
+# This Makefile contains rules to build files in the
+# device/espeth-esp32p4/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/espeth-esp32p4
+
+# W3: ETH0, la cara Xinu del ESP32-C6.  No es un driver de un periférico
+# nuevo: es el adaptador que convierte el canal de datos esp_hosted
+# (device/sdio-esp32p4, port verbatim del SDK bare-metal) en un device de red
+# con read()/write()/control(), que es lo que consume la pila nativa de Xinu
+# portada desde xinu-s3-amp (network/ + device/tcp + device/udp).
+C_FILES = espeth.c espethInit.c espethOpen.c espethClose.c espethRead.c \
+	  espethWrite.c espethControl.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

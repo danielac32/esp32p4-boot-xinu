@@ -39,7 +39,17 @@
 #define INITSTK     65536       /**< initial thread stack size          */
 #endif
 #define INITPRIO    20          /**< initial thread priority            */
-#define MINSTK      16 * 1024         /**< minimum thread stack size          */
+
+/* Suelo de pila que impone create() (system/create.c redondea hacia aqui).
+ * El upstream usa 16 KB, pero en el P4 el heap esta en L2MEM: 432320 B en
+ * total y, con las hebras que ya viven al arrancar (shell, bootTask, dash,
+ * tcpTimer, cada una con INITSTK), quedan ~65 KB libres.  Con 16 KB de suelo
+ * solo cabian 4 hebras y la red no arrancaba: create() devolvia SYSERR y la
+ * shell imprimia SHELL_CHILDERR.  Se baja a 4 KB para que cada hebra pida lo
+ * que de verdad necesita; el techo de cada una se mide con `ps', que imprime
+ * el pico observado por tarea (stack_peak(), system/stack.c).  El tcpTimer ya
+ * no usa INITSTK: pide TCP_TIMER_STK (include/network.h). */
+#define MINSTK      4 * 1024    /**< minimum thread stack size          */
 #ifdef JTAG_DEBUG
 #define INITRET   debugret      /**< threads return address for debug   */
 #else                           /* not JTAG_DEBUG */
