@@ -17,6 +17,18 @@ No hay FreeRTOS ni ESP-IDF en runtime. Los drivers escriben offsets crudos
 sobre la dirección base del periférico; los headers del SDK de Espressif se usan
 solo como referencia de documentación, nunca como include.
 
+**La interfaz gráfica Java está aparcada** (2026-11-05): el JVM, sus natives, el
+SDK java, el launcher `workspace` y las cinco apps viven en `parked/java-gui/` y
+no entran en el build.  El kernel arranca sin panel: red, consola y shell.
+Antes de tocar nada de eso, leer `parked/java-gui/README.md` (tiene el paso a
+paso para reactivar y el estado de lo que quedó roto).
+
+**LVGL volvió al árbol** (2026-11-05) como biblioteca del kernel, sin la VM: es
+la base de la tabla de exports para apps en C cargadas como ELF
+(`system/exports.c`; la app de ejemplo `examples/p4-elfsdk/apps/ejemplo/`
+es la referencia para quien escribe una app).  `main()` sigue sin lanzar interfaz alguna, así que el panel arranca en
+negro y la hebra residente `lvglui` solo refresca lo que un ELF monte.
+
 - Árbol Xinu: `/home/daniel/xinu-p4.2` (este directorio; es repo git, rama `main`).
 - SDK de referencia: `/home/daniel/Descargas/esp32-riscv-bare-metal-sdk-main`
   (`core/hal/esp32p4/include/hal/*.ll.h`, `core/soc/esp32p4/register/hw_ver1/`,
@@ -43,8 +55,19 @@ make ESPTOOL=/home/daniel/esp-idf-py/bin/esptool flashxinu # flashea + hard rese
   tenerla abierta**; si cutecom u otro la sostiene, todo lo demás falla con
   "Dispositivo o recurso ocupado" — mirar `fuser -v /dev/ttyACM0` antes de culpar
   al kernel.
-- **Abrir el puerto resetea la placa** y el arranque tarda ~9 s. El banner de
-  arranque no es capturable; se valida el init de los devices ejecutando comandos.
+- **Abrir el puerto NO resetea la placa** (medido el 2026-11-06:
+  `serial.Serial("/dev/ttyACM0", 115200, exclusive=True)` sobre una placa ya
+  arrancada devuelve el `xsh$` a los 5 s y sin banner). Lo que sí resetea es el
+  pulso RTS de `make flash` y el comando `reset` de la shell. Y **tras un
+  `reset` el enlace CDC del anfitrión queda roto**: el nodo sigue existiendo pero
+  no vuelve ni un byte hasta que `esptool --chip esp32p4 --port /dev/ttyACM0
+  --baud 115200 --after hard_reset chip_id` re-sincroniza la USB y suelta la
+  placa arrancando normal. Es la forma limpia de reiniciar sin re-flashear.
+- El arranque **no son 9 s cuando la AP guardada no existe**: el gate de
+  `netboot` hace 3×3 reintentos de ~50 s y el `xsh$` aparece a los ~190 s
+  (medido). Con la AP correcta son ~20 s. El banner de arranque no es capturable
+  si la placa ya estaba arriba; se valida el init de los devices ejecutando
+  comandos.
 - Automatización usada: un proceso python que abre el puerto, `dtr=True`, espera
   9,5 s, limpia el búfer y por cada comando escribe `cmd\n` y lee en una ventana
   de tiempo fija. Scratch en `/tmp/p4cmds.py` (varios comandos, una ventana cada
@@ -279,6 +302,23 @@ audio in [on|off]      montar/parar la captura; solo `in` = estado del RX
 ---
 
 ## 7. Dónde mirar antes de tocar
+
+- Todo lo gráfico Java (JVM, natives, apps, launcher): `parked/java-gui/README.md`.
+- Apps en C cargadas como ELF: la tabla de símbolos del kernel en
+  `system/exports.c` (+ `include/exports.h`), el cargador en `system/elfload.c`
+  (+ `include/elfload.h`) con su único cliente de shell: `elf /elf/x.elf [args...]`,
+  que corre el app en la hebra del propio comando.  `exit()` dentro del app es
+  `kill(gettid())` (elf_exit en `system/elfload.c`), y el `kill()` del kernel
+  libera el bloque de PSRAM vía los campos `elf_task/elf_img/elf_size` de
+  `struct thrent`.  Cómo se escribe una app: `examples/p4-elfsdk/apps/ejemplo/`
+  (ejemplo.c + Makefile + lib/start.S; sin cabecera de exports: solo includes
+  del kernel).  Regla de
+  oro: con `--gc-sections` una función a la que nadie llama no existe en el ELF,
+  así que la tabla de exports **define** la ABI; no añadir nombres a mano sin
+  comprobarlos con `nm`.  Segunda regla, medida en placa: el código del app se
+  copia y se ejecuta por la ventana directa `0x88......`, pero eso **no** evita
+  la cache — hay que hacer write-back + invalidate de L1-D y L2 sobre el bloque
+  antes de copiar (paso 5 de `system/elfload.c`).
 
 - Diseño del segundo núcleo: `README_CORE1.md`.
 - Notas del arranque de pantalla: `docs/lcd-boot-notas.md`.

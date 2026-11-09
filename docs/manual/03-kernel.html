@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>III — El Kernel (corazón del sistema) | Manual Xinu-P4.2</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--stamp:#8b2e2e;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}
+body{margin:0 auto;max-width:1140px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}
+.mast a:hover{background:var(--accent2);color:#fff}
+.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}
+h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule);padding-bottom:2px}
+h3{font-size:17px;margin:16px 0 4px;color:var(--accent2)}
+h4{font:700 13.5px var(--mono);margin:12px 0 3px;color:var(--stamp);text-transform:uppercase;letter-spacing:.04em}
+p,li{margin:5px 0} ul,ol{margin:5px 0 5px 20px;padding:0}
+code,kbd{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.8px/1.45 var(--mono);white-space:pre-wrap}
+pre .c{color:#b7a98e} pre .k{color:#f0c674} pre .f{color:#8abeb7} pre .s{color:#b5bd68}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}
+.warn{border-left-color:#b06500}.danger{border-left-color:var(--stamp)}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0;background:var(--hi)}
+th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}
+th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.file{font:700 12.5px var(--mono);color:var(--accent)}
+.sig{font:12.5px var(--mono);color:#1a3a44;background:#e8efe8;border:1px solid #b9ccb9;padding:6px 8px;margin:4px 0;display:block;white-space:pre-wrap}
+.toc{border:1px solid var(--rule);background:var(--hi);padding:10px 14px;margin:8px 0}
+.toc ol{margin:4px 0 0 22px}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo III — El Kernel (corazón del sistema)</h1></div>
+<main>
+
+<div class="note">
+<b>Alcance.</b> Este capítulo describe el kernel de Xinu en este port (ESP32-P4, RISC-V, core0). Cubre los ficheros de <code>system/</code> y <code>system/arch/</code>/<code>system/platforms/esp32p4/</code>: arranque, hilos y planificación, sincronización (semáforos/monitores/mutex), memoria, reloj, colas, despacho de E/S, memoria de apps ELF y gestores auxiliares. Para cada componente se indica: <b>fichero</b>, <b>API</b>, <b>funcionamiento interno</b>, <b>para qué se usa</b> y <b>quién lo llama</b>.
+</div>
+
+<div class="toc"><b>Índice de subsistemas</b>
+<ol>
+<li>Arranque e inicialización (<code>initialize.c</code>, <code>main.c</code>, <code>platforminit</code>)</li>
+<li>Hilos: tabla, creación, estados y terminación (<code>create</code>, <code>kill</code>, <code>ready</code>, <code>resume</code>, <code>suspend</code>, <code>chprio</code>, <code>get*</code>, <code>userret</code>)</li>
+<li>Planificador y cambio de contexto (<code>resched</code>, <code>ctxsw.S</code>, <code>setupStack</code>)</li>
+<li>Semáforos (<code>semcreate</code>, <code>wait</code>, <code>signal</code>, <code>signaln</code>, <code>semfree</code>, <code>semcount</code>)</li>
+<li>Monitores (<code>moncreate</code>, <code>lock</code>, <code>unlock</code>, <code>monfree</code>, <code>moncount</code>) y mutex</li>
+<li>Mensajes, sueño y tiempo (<code>send/receive/recv*</code>, <code>sleep/unsleep</code>, <code>clk*</code>)</li>
+<li>Memoria: heap L2MEM, PSRAM y buffer pools (<code>memget/memfree</code>, <code>psrammem</code>, <code>bfp*</code>, <code>buf*</code>)</li>
+<li>Colas e inserción diferida (<code>queue</code>, <code>queinit</code>, <code>insert</code>, <code>insertd</code>, <code>getitem/getfirst/getlast</code>)</li>
+<li>Despacho de E/S (<code>open/close/read/write/getc/putc/seek/control</code>, <code>getdev</code>, <code>ioerr/ionull</code>)</li>
+<li>Extensiones del port: ELF/PSRAM de tarea, <code>exports</code>, <code>appmgr</code>, <code>sdmmcbus</code>, <code>fslock</code>, mp3</li>
+</ol></div>
+
+<h2>1. Arranque e inicialización</h2>
+<h3><span class="file">system/initialize.c</span></h3>
+<span class="sig">void nulluser(void)  /* punto de entrada C del kernel, noreturn */<br>static int sysinit(void)</span>
+<p><b>Funcionamiento.</b> Tras el SBL y <code>loader/.../start.S</code> (copia <code>.data</code>, borra <code>.bss</code>, configura CLIC/mtvec/mtvt, FPU, pilas, aparca core1), salta a <code>nulluser()</code>:</p>
+<ol>
+<li><code>platforminit()</code> (en <code>system/platforms/esp32p4/platforminit.c</code>): rellena <code>platform</code> (<code>family="riscv32"</code>, <code>name="esp32p4"</code>, <code>minaddr=P4_L2MEM_BASE</code>, <code>maxaddr=_l2mem_free_end</code> → heap en L2MEM interna), <code>clkfreq=P4_TIMER_FREQ</code>; llama <code>clic_init()</code>; registra <code>ecall_handler</code> para <code>TRAP_CAUSE_ECALL_M</code>; configura muestreo <code>mtime</code> (<code>P4_MTIMECTL</code>).</li>
+<li><code>sysinit()</code>: inicializa globals; arma <code>memlist</code> sobre <code>[memheap, platform.maxaddr]</code> (alineado <code>roundmb/truncmb</code>), con nodo centinela de longitud 0 y un bloque libre; marca <code>thrtab</code> libre y crea la entrada <b>NULLTHREAD</b> (<code>THRCURR</code>, prio 0, pila <code>NULLSTK</code> desde <code>&amp;_end</code>, nombre <code>"prnull"</code>); inicializa <code>semtab</code> (todas <code>SFREE</code>, colas), <code>montab</code>; <code>sdmmcBusInit()</code> (candado compartido microSD/C6); <code>bfptab</code>; <code>readylist=queinit()</code>; si <code>RTCLOCK</code> <code>clkinit()</code>; <code>mailboxInit()</code>; recorre <code>devtab[0..NDEVS-1].init(devptr)</code>; si <code>NNETIF</code> <code>netInit()</code> (pool bfp, pila, temporizador TCP).</li>
+<li><code>enable()</code>: habilita interrupciones globales (<code>mstatus.MIE</code> en el hart).</li>
+<li><code>ready(create((void*)main, INITSTK, INITPRIO, "MAIN", 2, 0, NULL), RESCHED_YES)</code>: crea y pone listo el hilo <code>main</code>, cediendo CPU.</li>
+<li>Bucle nulo: <code>for(;;) sleep(SEC_1)</code> (si <code>RTCLOCK</code>).</li>
+</ol>
+<p><b>Quién lo llama.</b> El loader (<code>start.S</code>) salta a <code>nulluser</code> una sola vez en core0. <b>Uso.</b> Establece todas las tablas/recursos del kernel antes de ejecutar tareas.</p>
+<div class="note warn"><b>Reglas del hilo nulo.</b> Nunca termina, nunca se bloquea en E/S (solo <code>kprintf</code> síncrono es tolerable). Con <code>RTCLOCK</code> despierta cada segundo por el tick.</div>
+
+<h3><span class="file">system/main.c</span></h3>
+<span class="sig">thread main(void)</span>
+<p><b>Funcionamiento.</b> Primer hilo de usuario del sistema (creado por <code>nulluser</code>). Arranca servicios/tareas del sistema (p. ej. <code>netBootTask</code>, y el launcher <code>/apps/launcher/app.elf</code> en su propia hebra, según configuración del port) y permanece vivo o cede según el diseño. <b>Restricción crítica:</b> <u>no tocar <code>p4demoTask</code></u> (demo LVGL permanente de la placa).</p>
+<p><b>Quién lo llama.</b> El planificador, tras <code>ready(..., RESCHED_YES)</code> en <code>nulluser</code>.</p>
+
+<h3><span class="file">loader/platforms/esp32p4/start.S</span> y <code>system/arch/riscv/trap.c</code></h3>
+<p><b><code>_start/reset_handler</code> (asm):</b> fija <code>gp</code>, filtra <code>mhartid</code> (solo hart 0 continúa; otros → <code>park</code> con pila <code>_core1stk_end</code>, <code>mtvec</code> propio, testigo <code>{0xC0DE1234,mhartid,sp}</code>, bucle <code>wfi</code>), habilita FPU (<code>mstatus.FS</code>, <code>fcsr=0</code>), copia <code>.data</code>/<code>.bss</code>, instala <code>mtvt</code> (tabla HW CLIC) y <code>mtvec = ExceptionVectorTable|3</code>, prepara <code>panicstk</code> y pila del hilo nulo, llama <code>nulluser</code>.</p>
+<p><b><code>trap_handler(struct trap_frame *frame)</code>:</b> lee <code>mcause</code>; si <code>ecall</code> (11) avanza <code>mepc += 4</code> y despacha <code>syscall_dispatch(frame)</code> (resultado en <code>a0</code>); si hay manejador registrado (<code>trap_register</code>) lo invoca; si no, vuelca <code>mcause/mepc/mtval/ra/sp/a0-a3</code>, intenta identificar el ELF propietario de <code>mepc</code> (<code>elf_quien</code>, weak) y <code>halt()</code>. <b>Quién lo llama:</b> el stub de <code>ExceptionVectorTable</code> (asm) ante excepciones síncronas. <b>Nota:</b> las IRQ vectorizan por HW vía <code>mtvt</code>/CLIC, no por esta tabla.</p>
+
+<h2>2. Hilos: tabla, creación, estados y terminación</h2>
+<p><b>Estructura central:</b> <code>struct thrent thrtab[NTHREAD]</code> (estado, prioridad, <code>stkbase/stklen/stkptr</code>, nombre, padre, semáforo de espera, mensaje/flag, descriptores de E/S, contabilidad <code>cpu_ticks</code>/high-water, y campos ELF <code>elf_task/elf_img/elf_size</code>). Globals: <code>thrcurrent</code>, <code>thrcount</code>, <code>readylist</code>. Estados típicos: <code>THRFREE, THRCURR, THRREADY, THRSUSP, THRSLEEP, THRWAIT, THRTMOUT, THRRECV</code> (según cabeceras del árbol).</p>
+
+<h3><span class="file">system/create.c</span> — crear un hilo</h3>
+<span class="sig">tid_typ create(void *procaddr, uint ssize, int priority, const char *name, int nargs, ...)</span>
+<p><b>Funcionamiento.</b> <code>im=disable()</code>; valida/alinea <code>ssize</code> (<code>MINSTK</code>); <code>saddr=stkget(ssize)</code> (pila del heap L2MEM, <code>SYSERR</code> si no hay memoria); <code>tid=thrnew()</code> (busca <code>THRFREE</code> rotando <code>nexttid</code>, incrementa <code>thrcount</code>, devuelve <code>thrtab[tid]</code> como <code>thrptr</code>); copia <code>name</code>, fija <code>state=THRSUSP</code>, <code>prio</code>, <code>stkbase/stklen</code>, <code>memlist</code> local, <code>hasmsg=FALSE</code>, <code>parent=gettid()</code>, fds <code>0/1/2=CONSOLE</code>; toma <code>va_list</code> y <code>thrptr-&gt;stkptr = setupStack(saddr, procaddr, INITRET, nargs, ap)</code>; limpia contadores (<code>cpu_ticks</code>, high-water, <code>stkmark</code>); <code>restore(im)</code>; devuelve <code>tid</code>. <b>Queda suspendido</b> (no en <code>readylist</code>) hasta <code>ready(tid,...)</code> o <code>resume(tid)</code>.</p>
+<p><b>Para qué.</b> Crear tareas del kernel, servicios (red, UI <code>lvglui</code>, <code>netboot</code>), hilos de apps lanzadas por el launcher, reproductores, etc. <b>Quién lo llama.</b> <code>nulluser</code> (crea <code>main</code>), <code>main</code>/servicios, shell (comandos que lanzan tareas), launcher (<code>app_runner</code>), drivers/stack de red, apps ELF (vía export <code>create</code>).</p>
+
+<h3><span class="file">system/ready.c</span></h3>
+<span class="sig">int ready(tid_typ tid, bool resch)</span>
+<p>Pone <code>thrtab[tid].state=THRREADY</code> e inserta en <code>readylist</code> por prioridad (<code>insert</code>). Si <code>resch==RESCHED_YES</code> llama <code>resched()</code>. <b>Llamado por:</b> <code>resume</code>, <code>signal/signaln</code> (al despertar), <code>create</code>+puesta en marcha, <code>wakeup</code>/relojes, <code>kill</code> (casos indirectos según estado), código de red/dispositivos que despiertan hilos.</p>
+
+<h3><span class="file">system/suspend.c</span> / <span class="file">system/resume.c</span></h3>
+<span class="sig">syscall suspend(tid_typ tid)  → prioridad anterior o SYSERR<br>syscall resume(tid_typ tid)   → prioridad o SYSERR</span>
+<p><b>suspend:</b> con IRQ off, valida <code>tid</code> (no nulo). Si <code>THRREADY</code>, lo quita de la cola (<code>getitem</code>) y pasa a <code>THRSUSP</code>. Si <code>THRCURR</code>, pasa a <code>THRSUSP</code> y <code>resched()</code> (se suspende a sí mismo). <b>resume:</b> valida que esté <code>THRSUSP</code> y hace <code>ready(tid, RESCHED_YES)</code>. <b>Uso:</b> control explícito de ejecución; menos común que semáforos para sincronización.</p>
+
+<h3><span class="file">system/kill.c</span> — terminar un hilo</h3>
+<span class="sig">syscall kill(tid_typ tid)</span>
+<p><b>Funcionamiento.</b> IRQ off; valida (no <code>NULLTHREAD</code>). Si al decrementar <code>thrcount</code> queda ≤1 llama <code>xdone()</code>. Envía <code>tid</code> al padre (<code>send(thrptr-&gt;parent, tid)</code>). Libera pila (<code>stkfree</code>). <b>Si <code>elf_task</code> y <code>elf_img</code> no nulo</b>: <code>psram_freemem(elf_img, elf_size)</code> y limpia campos — así se recupera la imagen ELF en PSRAM (clave para <code>exit()</code> de apps). Según estado: <code>THRSLEEP/THRTMOUT</code> → <code>unsleep(tid)</code> (sacarlo de <code>sleepq</code>; <code>THRTMOUT</code> también está en <code>sleepq</code>, p. ej. <code>recvtime</code>) y <code>THRFREE</code>; <code>THRCURR</code> (suicidio) → <code>THRFREE</code> y <code>resched()</code> (no retorna); <code>THRWAIT</code> → incrementa <code>count</code> del semáforo y cae a quitar de cola; <code>THRREADY</code> → <code>getitem(tid)</code>; por defecto <code>THRFREE</code>. <code>restore(im)</code>.</p>
+<p><b>Para qué.</b> Terminar tareas. <b><code>exit()</code> de apps ELF</b> (export local en <code>elfload</code>) hace <code>kill(gettid())</code>, por eso mata la hebra y libera la PSRAM del app. <b>Quién lo llama:</b> shell (<code>kill</code>), kernel/servicios, apps ELF (vía <code>exit</code>/export según ruta), el propio hilo (suicidio).</p>
+
+<h3>Otros de hilo</h3>
+<table>
+<tr><th>Fichero</th><th>API / rol</th><th>Quién lo usa</th></tr>
+<tr><td><code>gettid.c</code></td><td><code>gettid()</code> → <code>thrcurrent</code></td><td>Kernel, drivers, apps (registro <code>appmgr</code>, debug)</td></tr>
+<tr><td><code>getprio.c</code>/<code>chprio.c</code></td><td>Consultar/cambiar prioridad; puede requerir reencolar</td><td>Servicios/shell según necesidad</td></tr>
+<tr><td><code>userret.c</code></td><td>Retorno por defecto si un hilo vuelve de su función (<code>INITRET</code>); normalmente mata/limpia</td><td>Contexto inicial armado por <code>setupStack</code></td></tr>
+<tr><td><code>xdone.c</code> (referenciado)</td><td>Apagado/fin cuando no quedan hilos útiles</td><td><code>kill</code></td></tr>
+</table>
+
+<h2>3. Planificador y cambio de contexto</h2>
+<h3><span class="file">system/resched.c</span></h3>
+<span class="sig">int resched(void)  /* usa globals: resdefer, thrcurrent, readylist */</span>
+<p><b>Funcionamiento.</b> Actualiza high-water de pila del hilo actual (<code>stack_note(thrcurrent, &amp;stkmark)</code>). Si <code>resdefer &gt; 0</code> incrementa y retorna (rescheduling diferido, útil en secciones críticas que se reanudan). Si el actual es <code>THRCURR</code> y su prioridad ≥ cabeza de <code>readylist</code>, permanece. Si no: si sigue <code>THRCURR</code> lo pasa a <code>THRREADY</code> e inserta en <code>readylist</code>; toma <code>thrnew = dequeue(readylist)</code> como nuevo <code>THRCURR</code>; <code>preempt = QUANTUM</code>; <code>ctxsw(&amp;throld-&gt;stkptr, &amp;thrnew-&gt;stkptr, asid)</code>. Al volver, el hilo reanudado continúa tras su <code>ctxsw</code>/punto de bloqueo.</p>
+<p><b>Quién lo llama.</b> <code>ready(RESCHED_YES)</code>, <code>sleep</code>, <code>wait</code> (al bloquear), <code>kill</code> (suicidio/casos), <code>yield</code>, <code>clkhandler</code> (vía <code>wakeup</code> o directamente), <code>suspend</code> del actual. <b>Requisito:</b> con IRQ habilitadas en los puntos donde debe poder cambiar; <code>resdefer</code> coordina con ISRs.</p>
+
+<h3><span class="file">system/arch/riscv/ctxsw.S</span></h3>
+<p>Guarda/restaura contexto en el área apuntada por <code>stkptr</code>: <code>ra, mstatus, s0-s11, a0-a7</code> y estado FPU <code>f0-f31 + fcsr</code> (<b>56 palabras</b> en RV32 del port). Razón de la FPU: preservar registros float entre hilos (p. ej. decodificación MP3 con minimp3 float) y evitar corrupción cruzada. Para un hilo nuevo, el <code>mstatus</code> preparado por <code>setupStack</code> (con <code>MIE/MPIE/MPP/FS</code>) permite entrar con IRQs/FPU habilitados (vía <code>mret</code> según el camino del port); para uno existente vuelve a su flujo.</p>
+
+<h3><span class="file">system/arch/riscv/setupStack.c</span></h3>
+<span class="sig">void *setupStack(void *stackaddr, void *procaddr, void *retaddr, uint nargs, va_list ap)</span>
+<p>Reserva espacio para args spill (más allá de <code>a0-a7</code>) alineado a 16, construye el marco de <code>CONTEXT_WORDS</code> (56) inicializado a 0, fija <code>procaddr</code>/<code>retaddr</code> (<code>INITRET</code>→<code>userret</code>), <code>mstatus = MSTATUS_MIE|MSTATUS_MPP|MSTATUS_MPIE|MSTATUS_FS</code>, coloca hasta 8 args en <code>a0-a7</code> y el resto en pila. Devuelve el nuevo <code>stkptr</code> que usará <code>ctxsw</code>. <b>Llamado por:</b> <code>create()</code>.</p>
+
+<h2>4. Semáforos</h2>
+<p>Estructura <code>struct sement semtab[NSEM]</code>: <code>state</code> (<code>SFREE/SUSED</code>), <code>count</code> (entero, puede ser negativo = número de hilos en espera), <code>queue</code>. Acceso con <code>disable()/restore()</code> (exclusión en el hart).</p>
+
+<h3><span class="file">semcreate.c</span> / <span class="file">semfree.c</span> / <span class="file">semcount.c</span></h3>
+<span class="sig">semaphore semcreate(int count)   /* count >= 0 */<br>syscall semfree(semaphore sem)<br>int semcount(semaphore sem)</span>
+<p><b>semcreate:</b> rechaza <code>count&lt;0</code>; asigna entrada libre (<code>semalloc</code>, rotación <code>nextsem</code>), marca <code>SUSED</code>, fija <code>count</code>. Falla si no hay semáforos libres (<code>SYSERR</code>). <b>semfree:</b> invalida el semáforo y despierta hilos en espera (según implementación Xinu: los pone listos con error/estado apropiado) para no dejarlos colgados. <b>Quién:</b> <code>moncreate</code> (crea el sem interno, count 1), inicialización de drivers/colas/buffer pools, subsistemas de red, apps/servicios que sincronizan productores-consumidores.</p>
+
+<h3><span class="file">wait.c</span> — P (esperar)</h3>
+<span class="sig">syscall wait(semaphore sem)</span>
+<p><b>Código real:</b> <code>im=disable()</code>; valida; si <code>--(semptr->count) &lt; 0</code> entonces <code>thrptr-&gt;state=THRWAIT; thrptr-&gt;sem=sem; enqueue(thrcurrent, semptr->queue); resched();</code> (el hilo se bloquea hasta ser despertado por <code>signal/signaln/semfree</code>); <code>restore(im)</code>. Si <code>count</code> era &gt;0, decrementa y retorna sin bloquear.</p>
+<p><b>Uso:</b> exclusión mutua (sem binario), esperar recursos/datos (counting). <b>Quién:</b> kernel (colas/buffers), monitores (indirecto), drivers (espera de E/S), red, apps.</p>
+
+<h3><span class="file">signal.c</span> / <span class="file">signaln.c</span> — V (señalar)</h3>
+<span class="sig">syscall signal(semaphore sem)<br>syscall signaln(semaphore sem, int count)</span>
+<p><b>signal:</b> <code>if ((semptr-&gt;count++) &lt; 0) ready(dequeue(semptr-&gt;queue), RESCHED_YES);</code> — si había hilos esperando (count era negativo), despierta a uno (FIFO de la cola del sem) y replanifica. <b>signaln:</b> despierta hasta <code>count</code> hilos. <b>Nota:</b> puede replanificar; no llamar desde ISR no reentrante sin coordinar <code>resdefer</code>.</p>
+
+<h2>5. Monitores y mutex</h2>
+<h3><span class="file">moncreate.c</span>, <span class="file">lock.c</span>, <span class="file">unlock.c</span>, <span class="file">monfree.c</span>, <span class="file">moncount.c</span></h3>
+<span class="sig">monitor moncreate(void)<br>syscall lock(monitor mon)<br>syscall unlock(monitor mon)</span>
+<p><b>Estructura:</b> <code>montab[]</code> con <code>state</code>, <code>owner</code> (<code>NOOWNER</code>), <code>count</code> (anidamiento del dueño), <code>sem</code> (semáforo interno, inicial 1).</p>
+<p><b>moncreate:</b> asigna monitor (<code>MUSED</code>), <code>owner=NOOWNER, count=0</code>, <code>sem=semcreate(1)</code>. <b>Falla</b> si no hay monitores o semáforos.</p>
+<p><b>lock (reentrante por dueño):</b> si <code>thrcurrent == owner</code> incrementa <code>count</code> y retorna. Si no, <b>habilita IRQs y hace <code>wait(sem)</code></b> (puede bloquearse/dormir en la CPU — por eso se espera <em>antes</em> de reclamar ownership, evitando el deadlock documentado en el código: reclamar primero y esperar después puede entregar el monitor al hilo equivocado). Al despertar, con IRQ off fija <code>owner=thrcurrent, count=1</code>.</p>
+<p><b>unlock:</b> solo el dueño puede soltar; decrementa <code>count</code>; si llega a 0, <code>owner=NOOWNER</code> y <code>signal(sem)</code> para despertar a un esperador. No es válido desbloquear desde otro hilo (el código lo rechaza).</p>
+<p><b>Usos reales en el port:</b> <code>lvgl_lock/lvgl_unlock</code> serializa el acceso a LVGL (monitor no reentrante desde la perspectiva de callbacks de <code>lvglui</code>: el callback ya corre bajo el lock del port → no re-tomar); <code>sdmmcBusLock</code>/<code>BusInit</code> serializa el bus SDMMC compartido (SD + C6); locks internos de FatFs (<code>fatmon</code>); exclusión en drivers/servicios.</p>
+<div class="note warn"><b>Importante.</b> Los monitores protegen en el mismo espacio de direcciones/hart bajo la semántica de Xinu aquí. No son primitivas SMP seguras entre núcleos por sí solas; <code>disable()</code> es local al hart.</div>
+
+<h3><span class="file">system/mutex.c</span> y colas de mensajes</h3>
+<p><code>mutex</code> provee primitivas de exclusión adicionales usadas por subsistemas; <code>mqueue.c</code> implementa colas de mensajes del kernel (distintas de las colas <code>qid</code> de planificación). <b>Quién:</b> pila de red/servicios internos según necesidad.</p>
+
+<h2>6. Mensajes, sueño y tiempo</h2>
+<h3>Mensajes entre hilos: <code>send.c</code>, <code>receive.c</code>, <code>recvclr.c</code>, <code>recvtime.c</code></h3>
+<span class="sig">syscall send(tid_typ tid, umsg32 msg)<br>umsg32 receive(void) / recvclr() / recvtime(int32 ms)</span>
+<p><b>Modelo.</b> Cada hilo tiene un buzón de un mensaje (<code>hasmsg/msg</code>). <code>send</code> entrega el mensaje (despierta al receptor si esperaba). <code>receive</code> bloquea hasta tener mensaje; <code>recvclr</code> limpia sin bloquear; <code>recvtime</code> espera con timeout (<code>THRTMOUT</code> en <code>sleepq</code> — por eso <code>kill</code> debe hacer <code>unsleep</code> también en <code>THRTMOUT</code>). <b>Uso:</b> señalización padre/hijo (<code>kill</code> envía el tid al padre), sincronización ligera.</p>
+
+<h3><span class="file">sleep.c</span>, <span class="file">unsleep.c</span>, <span class="file">wakeup.c</span>, <span class="file">insertd.c</span></h3>
+<span class="sig">syscall sleep(uint ms)</span>
+<p><b>sleep:</b> <code>ticks = ms*CLKTICKS_PER_SEC/1000</code>; si <code>ticks&gt;0</code>, <code>insertd(thrcurrent, sleepq, ticks)</code> (cola delta de sleepers), <code>state=THRSLEEP</code>, <code>resched()</code>. <b>unsleep:</b> retira un hilo de <code>sleepq</code> (ajustando claves delta) — lo usa <code>kill</code> y despertado forzado. <b>wakeup (clkhandler):</b> mientras la cabeza de <code>sleepq</code> venza (clave ≤ 0) la desencola y <code>ready</code>.</p>
+
+<h3><span class="file">clkinit.c</span> / <span class="file">clkhandler.c</span> (si <code>RTCLOCK</code>)</h3>
+<p><b>clkinit:</b> crea <code>sleepq=queinit()</code>, pone <code>clkticks/clktime/clktotal</code> a 0, registra <code>clkhandler</code> en <code>IRQ_TIMER</code>, habilita IRQ y programa <code>clkupdate(platform.clkfreq/CLKTICKS_PER_SEC)</code>. <b>clkhandler (ISR):</b> reprograma el tick, incrementa <code>clkticks/clktotal</code> y <code>thrtab[thrcurrent].cpu_ticks</code> (contabilidad de CPU); cada <code>CLKTICKS_PER_SEC</code> avanza <code>clktime</code>; si <code>sleepq</code> no vacía decrementa su primera clave y si vence llama <code>wakeup()</code>, si no <code>resched()</code>.</p>
+<p><b>Quién:</b> <code>clkinit</code> lo llama <code>sysinit</code>; el <code>clkhandler</code> lo dispara el hardware timer/CLIC. <b>Consumidores:</b> <code>sleep</code>, timeouts de red/TCP, <code>uptime</code>, contabilidad <code>ps</code>.</p>
+<div class="note warn"><b>Sesgo temporal.</b> <code>platform.clkfreq = P4_TIMER_FREQ</code> (declarado 360 MHz) difiere del real (~320 MHz) → ticks/delays ~9/8 más largos (medido). Afecta <code>sleep</code>, timeouts y mediciones; no corregido por impacto en timings validados.</div>
+
+<h3><code>yield.c</code>, <code>mdelay.c</code>/<code>udelay.c</code></h3>
+<p><code>yield</code> cede CPU (<code>resched</code>) manteniendo listo al hilo. <code>mdelay/udelay</code> son esperas ocupadas o calibradas según implementación del port (útiles en drivers durante init con IRQs limitadas); preferir <code>sleep</code> en contexto de tarea cuando proceda.</p>
+
+<h2>7. Memoria</h2>
+<h3>Heap del kernel en L2MEM: <span class="file">memget.c</span> / <span class="file">memfree.c</span> / <span class="file">getmem/freemem</span></h3>
+<span class="sig">void *memget(uintptr_t nbytes)  /* first-fit, redondea a múltiplo de memblock */<br>syscall memfree(void *memptr, uintptr_t nbytes)</span>
+<p><b>memget:</b> redondea (<code>roundmb</code>), recorre <code>memlist</code> (first-fit): si bloque exacto lo desengancha; si mayor, lo parte (deja <code>leftover</code>); descuenta <code>memlist.length</code>. Devuelve puntero alineado (8 bytes) o <code>SYSERR</code>. <b>memfree:</b> valida rango <code>[memheap, platform.maxaddr]</code>, inserta ordenado por dirección y <b>coalescea</b> con anterior/posterior adyacentes. Todo bajo <code>disable/restore</code>.</p>
+<p><b>Para qué.</b> Pilas de hilos (<code>stkget/stkfree</code> usan el heap), estructuras del kernel, buffers. <b>Quién:</b> <code>create/kill</code>, <code>bufget</code>/pools, drivers, pila de red, libc Xinu (<code>malloc/free</code> sobre este heap según integración).</p>
+
+<h3>PSRAM: <span class="file">psrammem.c</span> y <code>device/psram</code></h3>
+<span class="sig">void *psram_malloc/psram_calloc/psram_realloc(...) ; void psram_free(void*); void psram_freemem(ptr,sz)</span>
+<p>Allocator independiente sobre <code>[_psram_free_start, _psram_free_end)</code> (definidos por <code>ld.script</code>, respetando <code>.audioshare/.sdshare</code> y la ventana del ULP). Se usa para buffers grandes (PCM, imágenes, bitmaps SJPG/RGB565 cacheados, estado de apps ELF, catálogos). <b>Quién:</b> <code>elfload</code> (imagen del app), <code>kill</code> (libera <code>elf_img</code>), audio, LVGL buffers, apps ELF (<code>gestos</code>/structs de estado), shell <code>psram</code> (info).</p>
+
+<h3>Buffer pools: <span class="file">bfpalloc.c</span>, <span class="file">bfpfree.c</span>, <span class="file">bufget.c</span>, <span class="file">buffree.c</span></h3>
+<p><code>bfptab[NPOOL]</code> gestiona pools de búferes de tamaño fijo (útil para paquetes de red). <code>netInit</code> crea el pool de paquetes (<code>NET_MAX_PKTLEN+sizeof(packet)</code>, <code>NET_POOLSIZE</code>). <code>bufget/buffree</code> (según variante) entregan/devuelven búferes; evitan fragmentación del heap para objetos de tamaño uniforme. <b>Quién:</b> pila de red (<code>net/arp/ip/tcp/udp/raw</code>), drivers que requieren bloques fijos.</p>
+
+<h2>8. Colas e inserción diferida</h2>
+<h3><span class="file">queue.c</span>, <span class="file">queinit.c</span>, <span class="file">insert.c</code>, <span class="file">insertd.c</code>, <span class="file">getitem.c</span>, <code>getfirst/getlast/getitem</code></h3>
+<p><b><code>queinit()</code></b> asigna una cabecera de cola (lista doblemente enlazada con cabeza/cola centinelas, claves). <b><code>insert(tid,q,key)</code></b> inserta ordenado por prioridad/clave (usado por <code>readylist</code> y colas de semáforos). <b><code>enqueue/dequeue</code></b> operaciones FIFO/LIFO según uso. <b><code>insertd(proc,q,key)</code></b> inserción delta para <code>sleepq</code>: la clave se guarda como diferencia respecto al anterior, permitiendo decrementar solo la cabeza en cada tick (<code>clkhandler</code>). <b><code>getitem/remove</code></b> extrae un elemento específico (p. ej. <code>kill</code>/<code>suspend</code> sacan de <code>readylist</code> o colas). <b>Quién:</b> planificador, semáforos, <code>sleep</code>/reloj, <code>recvtime</code>.</p>
+
+<h2>9. Despacho de E/S (capa de dispositivos)</h2>
+<h3><span class="file">open.c</span>, <span class="file">close.c</span>, <span class="file">read.c</span>, <span class="file">write.c</span>, <span class="file">getc.c</span>, <span class="file">putc.c</span>, <span class="file">seek.c</span>, <span class="file">control.c</span></h3>
+<span class="sig">devcall open(int descrp, ...) / read / write / control / ...</span>
+<p><b>Patrón (idéntico en todos):</b> valida <code>descrp</code> (<code>isbaddev</code> → <code>SYSERR</code>), obtiene <code>devptr=&amp;devtab[descrp]</code> y <b>despacha</b> a la rutina del driver (<code>devptr-&gt;open/read/write/control/...</code>), pasando <code>va_list</code> cuando aplica. No implementan lógica de dispositivo: son el <em>switch</em> uniforme de Xinu.</p>
+<p><b>Quién los llama.</b> Shell (comandos abren/leen/escriben/controlan <code>LCD0, AUDIO0, ETH0, TCP*, TOUCH0, POWER0, SD0, FAT0</code>…), kernel (<code>netInit</code>/red, <code>sysinit</code>), LVGL port (<code>control(LCD0,LCD_CTRL_BLIT)</code>, lee touch), servidores (<code>httpd/telnetd</code> sobre TCP), apps ELF (exportados: <code>open/read/write/control</code>).</p>
+
+<h3><span class="file">getdev.c</span>, <span class="file">ioerr.c</span>, <span class="file">ionull.c</span>, <span class="file">conf.c</span></h3>
+<p><code>getdev("NOMBRE")</code> busca el descriptor por nombre en <code>devtab</code>. <code>ioerr</code> retorna error; <code>ionull</code> retorna éxito nulo (usados como stubs en <code>conf</code> para operaciones no soportadas). <code>conf.c</code>/<code>conf.h</code> son <b>generados</b> desde <code>xinu.conf</code> por el configurador: definen <code>devtab[]</code>, <code>NDEVS</code> y constantes (<code>SERIAL0, ETH0, AUDIO0, TCP0...</code>).</p>
+
+<h2>10. Extensiones del port (corazón aplicado a ESP32-P4)</h2>
+<table>
+<tr><th>Fichero</th><th>Función</th><th>Detalle clave</th><th>Quién lo usa</th></tr>
+<tr><td><span class="file">elfload.c</span></td><td><code>elf_run(path,argc,argv)</code></td><td>Carga ET_REL RV32 desde FAT a PSRAM (0x88), aplica relocaciones (HI20/LO12_I/CALL/32), resuelve UND contra <code>exports</code> (+ <code>exit</code>→<code>elf_exit</code>), writeback+invalidate L1D/L2, salta a <code>_start</code>. Registra <code>elf_img/size/task</code> en la hebra.</td><td>Shell <code>elf</code>, launcher (<code>app_runner</code>)</td></tr>
+<tr><td><span class="file">exports.c</span></td><td><code>exports[]</code>, <code>exports_resolver</code></td><td>ABI de apps ELF: mapea nombre→puntero real. Referenciar aquí evita <code>--gc-sections</code>. No macros/inline.</td><td><code>elfload</code></td></tr>
+<tr><td><span class="file">appmgr.c</span></td><td>Tabla/estados de apps (<code>APP_*</code>)</td><td>Registro cooperativo (reusa slot por <code>path</code>), <code>RUNNING/BACKGROUND/CLOSING</code>, <code>take_foreground</code>, cierre cooperativo (sin kill forzado).</td><td>Launcher y apps ELF</td></tr>
+<tr><td><span class="file">sdmmcbus.c</span></td><td><code>sdmmcBusInit/Lock/Unlock</code></td><td>Monitor reentrante para SDMMC compartido: slot 0 microSD (FAT) y slot 1 ESP32-C6 (WiFi SDIO). Evita colisiones.</td><td>Drivers SD/SDMMC, capa SDIO/esp_hosted, FAT</td></tr>
+<tr><td><span class="file">fslock.c</span></td><td>Ayudas de bloqueo FS</td><td>Serialización de acceso a FAT cuando aplica.</td><td>Shell/apps/servicios</td></tr>
+<tr><td><span class="file">mp3.c</span></td><td>Decodificación/reproducción MP3</td><td>Usa minimp3 (float, preservado por FPU en <code>ctxsw</code>); integra con <code>AUDIO0</code>. Exportado a apps (<code>musica</code>).</td><td>App música, comandos audio según flujo</td></tr>
+<tr><td><span class="file">psrammem.c</span></td><td>Allocator PSRAM</td><td>Heap grande externo; libera imagen ELF en <code>kill</code>.</td><td>Todo el sistema</td></tr>
+<tr><td><span class="file">syscall.c</span>/<code>syscall_*.c</code></td><td>Despacho <code>ecall</code></td><td><code>trap</code> llama <code>syscall_dispatch</code>; puente de llamadas de sistema (según modelo del port).</td><td>Excepciones <code>ecall</code></td></tr>
+</table>
+
+<div class="note">
+<b>Lectura recomendada del código.</b> Empieza por <code>initialize.c</code> → <code>create.c</code> → <code>resched.c</code>+<code>ctxsw.S</code>/<code>setupStack.c</code> → <code>wait.c</code>/<code>signal.c</code> → <code>lock.c</code>/<code>unlock.c</code> → <code>kill.c</code> → <code>clkhandler.c</code> → <code>memget/memfree</code> → <code>open.c</code> → <code>elfload.c</code>/<code>exports.c</code>. Es el esqueleto completo del corazón de Xinu-P4.2.
+</div>
+
+</main>
+</body>
+</html>

@@ -230,7 +230,9 @@ auditoría del CLIC (sigue sin portar) y el pico de pilas (indicio deliberado).
 |---|---|---|---|---|
 | `clk` | monotonía de `millis()`, cuentas/ms, `micros()` | 360 000 ±2 % | monótona **OK**; **402 818 cuentas/ms** `[AVISO]`; `micros()` 111 533 µs en 100 ms **OK** (tolerancia 30 %) | todo retardo y todo temporizador de red; los `TCP_FREQ` ticks se van |
 | `cpu` | `mcycle/mtime`, bucle de referencia | ratio y tiempo del bucle | ratio **0,9999** → core **319,977 MHz**; bucle **5,34 ciclos/iter** (3 338 µs / 200 000) | ni velocidad ni rendimiento del camino de instrucciones |
-| `mem` | `memlist` (heap L2MEM), `psram_free_bytes()`, patrón de 64 palabras vía `memget(256)`, alias `0x48`/`0x88`, `_l2reserve` | >100 KB L2, >16 MB PSRAM, patrón íntegro, corte 0x4FF20000 | patrón 64/64 **OK**; alias `[AVISO]` (escribe `0xC0FFEE11` por `0x88`, lee `0xaaafeeab` por `0x48`); banda fantasma **OK** | la banda fantasma vuelve: líneas leídas a cero, `irq with null vector`, cuelgue mudo |
+| `mem` | `memlist` (heap L2MEM), `psram_free_bytes()`, patrón de 64 palabras vía `memget(256)`, alias `0x48`/`0x88`, `_l2reserve` | >100 KB L2, >16 MB PSRAM, patrón íntegro, corte 0x4FF20000 | patrón 64/64 **OK**; alias `[AVISO]` (escribe `0xC0FFEE11` por `0x88`, lee `0xaaafeeab` por `0x48`; el valor que
+devuelve la lectura con caché **varía en cada arranque** — el 2026-11-04, tras un reset, salía
+`0xaaafeeef`; lo que se comprueba es que no es lo escrito); banda fantasma **OK** | la banda fantasma vuelve: líneas leídas a cero, `irq with null vector`, cuelgue mudo |
 | `net` | `netLookup(getdev("ETH0"))`, `semcount(bfptab[netpool].freebuf)`, ARP, rutas, `ESPETH_CTRL_STATS` | libres > nbuf/4, `rx_drops` < 50 | 4/4 **OK**; libres **23 de 24** en reposo, **16 de 24** con `ping` sostenido; `drops 0` | la pila espera en `bufget()` y el espeth descarta: es la pérdida de tramas que ya se arregló |
 | `dev` | `I2C_CTRL_PROBE` 0x18/0x34/0x38, `POWER_CTRL_PERCENT`, `AUDIO_CTRL_GET_VOLUME`, `TOUCH_CTRL_TYPE`, LBA0 con `0x55AA`, `fs_mounted()` | presentes y en rango | todos **OK**; LBA0 leído con `SD_CTRL_SEEK` y firma `blk[510]=0x55`/`blk[511]=0xAA` correcta | cualquier dispositivo del AGENTS.md §4 deja de dar por buena la regresión |
 | `int` | qué hace falta para auditar el CLIC | — | `[AVISO]`: sigue siendo un `printf` con la receta; hace falta portar `examples/psram-blob/xsh_irqmap.c` | una línea con `ie=1` y `interruptVector[]` nulo cae en `irq_missing()` y para la placa (`system/platforms/esp32p4/clic.c:61`) |
@@ -239,7 +241,7 @@ auditoría del CLIC (sigue sin portar) y el pico de pilas (indicio deliberado).
 
 **Lo que se aprendió cableando `flash`, y que afecta al punto 18 (OTA):** la
 expectativa original — encontrar `0xE9` en `0x5000` y en `0x100000` — era falsa.
-`ld.script:26` declara `FLASH (rx) : ORIGIN = 0x40005000`, así que el kernel está
+`ld.script:28` declara `FLASH (rx) : ORIGIN = 0x40005000`, así que el kernel está
 **enlazado para ejecutar en la ventana XIP** (VMA == LMA) y lo que hay en ese
 offset es código, no la cabecera ESP; esa cabecera la consume el SBL al cargar y
 no aparece tal cual en la ventana.  El ULP en `0x100000` tampoco empieza por

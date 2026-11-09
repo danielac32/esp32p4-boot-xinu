@@ -13,6 +13,8 @@
 #include <kernel.h>
 #include <device.h>
 #include <lcd.h>
+#include <lvgl.h>                   /* lvglShotBmp: volcado del espejo */
+#include "lvgl/lvgl.h"              /* API LVGL: bootTask dibuja con widgets */
 #include <memory.h>
 #include <platform.h>
 #include <shell.h>
@@ -178,16 +180,99 @@ static void drawBootScreen(int dev)
  * @return OK for success, SYSERR for syntax error
  */
 
-int bootTask(int dev){
-    int lcddev = getdev("/dev/lcd0");
-    if (SYSERR == lcddev)
+int bootTask(void)
+{
+    lv_obj_t *scr, *root, *lbl;
+    char line[80];
+    int i, y;
+
+    kprintf("[boot] inicio\r\n");
+    if (SYSERR == control(LVGL0, LVGL_CTRL_READY, 0, 0))
     {
-        fprintf(stderr, "lcd: /dev/lcd0 is not mounted\n");
-        return SYSERR;
+        kprintf("[boot] LVGL no listo, omito\r\n");
+        return OK;
     }
-    drawBootScreen(lcddev);
+
+    lvgl_lock();
+    scr = lv_scr_act();
+
+    /* Contenedor propio: NO limpiar lv_scr_act() (rompe p4demoTask/launcher).
+     * Creamos un panel, lo mostramos un instante y borramos solo ese panel. */
+    root = lv_obj_create(scr);
+    lv_obj_remove_style_all(root);
+    lv_obj_set_size(root, 320, 480);
+    lv_obj_set_pos(root, 0, 0);
+    lv_obj_set_style_bg_color(root, lv_color_make(0, 0, 0), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(root, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+
+    y = 2;
+    lbl = lv_label_create(root);
+    lv_obj_set_style_text_font(lbl, &lv_font_unscii_8, LV_PART_MAIN);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(lbl, 316);
+    lv_label_set_text(lbl, "Xinu-P4.2 / ESP32-P4  " VERSION);
+    lv_obj_set_style_text_color(lbl, lv_color_make(255, 180, 0), LV_PART_MAIN);
+    lv_obj_set_pos(lbl, 2, y);
+    y += 12;
+
+    lbl = lv_label_create(root);
+    lv_obj_set_style_text_font(lbl, &lv_font_unscii_8, LV_PART_MAIN);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl, 316);
+    lv_label_set_text(lbl, SHELL_START);
+    lv_obj_set_style_text_color(lbl, lv_color_make(0, 220, 0), LV_PART_MAIN);
+    lv_obj_set_pos(lbl, 2, y);
+    y += 22;
+
+    sprintf(line, "phys %luk  code %luk\nstk  %luk  heap %luk",
+            (unsigned long)(((uintptr_t)platform.maxaddr - (uintptr_t)platform.minaddr) / 1024UL),
+            (unsigned long)(((uintptr_t)&_etext - (uintptr_t)_start) / 1024UL),
+            (unsigned long)(((uintptr_t)memheap - (uintptr_t)_end) / 1024UL),
+            (unsigned long)(((uintptr_t)platform.maxaddr - (uintptr_t)memheap) / 1024UL));
+    lbl = lv_label_create(root);
+    lv_obj_set_style_text_font(lbl, &lv_font_unscii_8, LV_PART_MAIN);
+    lv_label_set_text(lbl, line);
+    lv_obj_set_style_text_color(lbl, lv_color_make(0, 220, 220), LV_PART_MAIN);
+    lv_obj_set_pos(lbl, 2, y);
+    y += 22;
+
+    lbl = lv_label_create(root);
+    lv_obj_set_style_text_font(lbl, &lv_font_unscii_8, LV_PART_MAIN);
+    lv_label_set_text(lbl, "Mounted devices:");
+    lv_obj_set_style_text_color(lbl, lv_color_make(255, 255, 0), LV_PART_MAIN);
+    lv_obj_set_pos(lbl, 2, y);
+    y += 10;
+
+    for (i = 0; i < NDEVS && y < 468; i++)
+    {
+        if (devtab[i].name == NULL) { continue; }
+        sprintf(line, "/dev/%-9s %2d", devtab[i].name, devtab[i].num);
+        lbl = lv_label_create(root);
+        lv_obj_set_style_text_font(lbl, &lv_font_unscii_8, LV_PART_MAIN);
+        lv_label_set_text(lbl, line);
+        lv_obj_set_style_text_color(lbl, lv_color_make(180, 180, 180), LV_PART_MAIN);
+        lv_obj_set_pos(lbl, 2, y);
+        y += 9;
+    }
+
+    lvgl_unlock();
+    kprintf("[boot] dibujando (LVGL)...\r\n");
+
+    /* Tiempo de lectura del banner.  Tres resched() no bastaban: 'lvglui' se
+     * duerme entre pasadas y un frame completo son decenas de milisegundos de
+     * cable, asi que root se borraba antes de llegar a pintarse.  sleep() cede
+     * la CPU y deja que la hebra de la UI haga sus flush. */
+    sleep(1500);
+
+    lvgl_lock();
+    lv_obj_del(root);
+    lvgl_unlock();
+
+    kprintf("[boot] listo\r\n");
     return 0;
 }
+
 shellcmd xsh_lcd(int nargs, char *args[])
 {
     int             dev;
@@ -202,7 +287,8 @@ shellcmd xsh_lcd(int nargs, char *args[])
     {
         printf("Usage: lcd [demo | boot | fill <color> | rect <x> <y> <w> <h> <color>\n");
         printf("           | text <x> <y> <fg> <bg> <words...>\n");
-        printf("           | rot <0|2|4|6> | bl on|off]\n\n");
+        printf("           | rot <0|2|4|6> | bl on|off | speed [n] | clock [hz]\n");
+        printf("           | shot [ruta.bmp]\n\n");
         printf("Description:\n");
         printf("\tDraw on the ST7796 panel (/dev/lcd0).\n");
         printf("\tWith no argument (or 'demo'), draws the bring-up pattern.\n");
@@ -311,6 +397,20 @@ shellcmd xsh_lcd(int nargs, char *args[])
         return rc;
     }
 
+    if (0 == strcmp(args[1], "clock"))
+    {
+        long hz = (nargs >= 3) ? atol(args[2]) : 0;
+
+        return control(dev, LCD_CTRL_CLOCK, hz, 0);
+    }
+
+    if (0 == strcmp(args[1], "speed"))
+    {
+        int iters = (nargs >= 3) ? atoi(args[2]) : 10;
+
+        return control(dev, LCD_CTRL_SPEED, (long)iters, 0);
+    }
+
     if (0 == strcmp(args[1], "rot"))
     {
         int rot;
@@ -349,6 +449,21 @@ shellcmd xsh_lcd(int nargs, char *args[])
         }
         fprintf(stderr, "lcd: usage: lcd bl on|off\n");
         return SYSERR;
+    }
+
+    /* Foto de lo que LVGL tiene pintado: el espejo del fotograma, no el panel.
+     * Sirve para mirar la interfaz desde un PC sin tener la placa delante. */
+    if (0 == strcmp(args[1], "shot"))
+    {
+        const char *ruta = (nargs >= 3) ? args[2] : "/shot.bmp";
+
+        if (SYSERR == lvglShotBmp(ruta))
+        {
+            fprintf(stderr, "lcd: no pude escribir %s\n", ruta);
+            return SYSERR;
+        }
+        printf("lcd: foto -> %s\n", ruta);
+        return OK;
     }
 
     fprintf(stderr, "lcd: unknown subcommand '%s'\n", args[1]);

@@ -18,6 +18,12 @@
 
 extern __attribute__((noreturn)) void halt(void);
 
+/* El registro de imagenes ELF del cargador (system/elfload.c).  Lazos DEBILES:
+ * este mismo fichero sirve a imagenes que no llevan cargador (machine/sbl, ULP),
+ * y ahi los simbolos no existen -- de ahi que cada llamada se compruebe antes. */
+extern const char *elf_quien(uintptr_t) __attribute__((weak));
+extern void elf_dump_trap(void) __attribute__((weak));
+
 /* One C handler per synchronous cause (NULL = unhandled). */
 static trap_handler_t trap_handlers[TRAP_CAUSE_MAX];
 
@@ -65,6 +71,8 @@ void trap_handler(trap_frame_t *frame)
             (ulong)frame->ra, (ulong)frame->a0, (ulong)frame->a1,
             (ulong)frame->a2, (ulong)frame->a3, (ulong)frame->a4,
             (ulong)frame->a5, (ulong)frame->mstatus, (ulong)(uintptr_t)frame);
+
+    
     halt();
 }
 

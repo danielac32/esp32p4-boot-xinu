@@ -6,8 +6,9 @@
  * This is the exact Xinu memory mechanics (@c memblock / first-fit /
  * coalescence, see memget.c/memfree.c) applied to a SECOND list,
  * @c psramlist, over [_psram_free_start, _psram_free_end)
- * (0x48000000..0x49F00000, 31 MiB; it excludes the LP-core RAM at
- * 0x49F00000+).  The PSRAM is initialized and mapped by the SBL
+ * (0x48000000..0x49FF8000, 32M - 32K; it excludes the LP-core RAM, which
+ * ulp.ld parks in the last 32K at 0x49FF8000..0x4A000000).  The PSRAM is
+ * initialized and mapped by the SBL
  * (mmu_init), so here we only manage it.
  *
  * The L2MEM heap (memlist) is untouched: malloc()/calloc()/free() from
@@ -48,6 +49,17 @@ extern unsigned char _psram_free_end[];
 
 static void psramBad(const char *what, uintptr_t a, uintptr_t b)
 {
+    static const char bogus[] = "aviso con puntero pisado";
+
+    /* El kprintf con %s LEE la cadena, y aqui se llega justo cuando el heap
+     * esta corrupto: el trap medido (mepc dentro de esta funcion, mtval=0x4,
+     * a0=0xc) era este aviso saltando por un `what` que ya no era una cadena.
+     * Se valida el rango antes de tocarla; un aviso incompleto vale mas que
+     * el trap que tapaba. */
+    if ((uintptr_t)what < 0x40000000U || (uintptr_t)what > 0x5FFFFFFFU)
+    {
+        what = bogus;
+    }
     kprintf("[psram] %s: %08x %08x\r\n", what, (uint)a, (uint)b);
 }
 

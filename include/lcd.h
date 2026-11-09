@@ -50,6 +50,8 @@
 #define LCD_CTRL_BLIT      0x06 /**< arg1=&struct lcd_blit               */
 #define LCD_CTRL_DEMO      0x07 /**< bars + text (bring-up pattern)      */
 #define LCD_CTRL_ORIENT    0x08 /**< arg1=LCD_ROT_*                      */
+#define LCD_CTRL_SPEED     0x09 /**< arg1=n frames (banco de pruebas)    */
+#define LCD_CTRL_CLOCK     0x0A /**< arg1=Hz (reloj de bits en caliente) */
 
 /* Portrait orientations, named after the MADCTL bits they write and
  * numbered with the rotation numbers the reference drivers (Arduino_GFX,

@@ -1,0 +1,16 @@
+# This Makefile contains rules to build files in the device/lvgl/ directory.
+
+# Name of this component (the directory this file is stored in)
+COMP = device/lvgl
+
+# Source files for this component.  The LVGL library itself is built as the
+# top-level `lvgl' component (see lvgl/Makerules); this component adds the
+# kernel device glue: init, el puerto de pantalla sobre LCD0, el de puntero
+# sobre TOUCH0, el monitor que serializa la API y el backend de ficheros que
+# usan los decodificadores de LVGL (ver lvglfs.c).
+C_FILES = lvglport.c lvglfs.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

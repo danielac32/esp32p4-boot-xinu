@@ -12,113 +12,108 @@
 #include <version.h>
 #include <string.h>
 #include <stdlib.h>
+#include <elfload.h>
 static void print_os_info(void);
-
- 
-/**
- * Main thread.  It opens the console and starts the shell.
- */
-
-extern int bootTask(int dev);
-extern int dashTask(void);
-extern int p4demoTask(void);
+static thread launcherTask(void);
+extern int bootTask(void);
 extern int netBootTask(void);
+
+/* El launcher del arranque es un ELF de la microSD, no codigo del kernel: aqui
+ * solo esta la hebra que lo carga.  Necesita hebra propia porque elf_run()
+ * ejecuta el app en la pila de quien lo llama y el exit() del app es
+ * kill(gettid()): corriendo en main(), el SALIR del launcher se llevaria esta
+ * hebra.  32 KB de pila: el marco de elf_run() es de unos cientos de bytes, pero
+ * debajo corre la app entera (gestos + estado + creacion de objetos LVGL). */
+#define LAUNCHER_ELF "/apps/launcher/app.elf"
+#define LAUNCHER_STK 32768
+
+/**
+ * Crea una hebra que TERMINA y espera su tid.  El join es receive(): al devolver,
+ * userret()->kill() hace send(parent, tid), y el padre de esta hebra es main().
+ * Solo vale para tareas con fin (bootTask, netBootTask); el launcher es un app
+ * con bucle infinito y esperarlo seria colgarse aqui para siempre.
+ */
+static void lanzar_y_esperar(void *proc, uint pila, const char *nombre)
+{
+    tid_typ tid = create(proc, pila, INITPRIO, nombre, 0);
+
+    if (SYSERR == (int)tid)
+    {
+        kprintf("WARNING: no se pudo crear %s\r\n", nombre);
+        return;
+    }
+    ready(tid, RESCHED_YES);
+    while (receive() != (int)tid)
+    {
+        ;
+    }
+}
 
 thread main(void)
 {
-    tid_typ nettid = (tid_typ)SYSERR;
-    uchar netdead = FALSE;
-    uchar childdead = FALSE;
-
-    /* Print information about the operating system  */
-    print_os_info();
- 
-   // ready(create(uart_probe, INITSTK, 10, "uart_probe", 0), RESCHED_NO);
-
     if (SYSERR == open(CONSOLE, SERIAL0))
     {
         kprintf("WARNING: Can't open CONSOLE over SERIAL0\r\n");
         return 0;
     }
-    
-    
 
-    /* Arranque de red: C6 arriba, asociacion a la AP, ETH0 por DHCP y los
-     * servidores (telnet, y despues httpd/udpserver).  En xinu-s3-amp esta
-     * secuencia va en linea en main(), pero aqui necesita hebra propia porque
-     * el `wifi join' tarda varios segundos y main tiene que seguir con el
-     * panel.  El margen que necesita el C6 al arrancar lo pone la propia tarea,
-     * que espera y reintenta (NETBOOT_SETTLE_MS, shell/xsh_netboot.c:32). */
+    /* 1. El splash.  bootTask() pinta el banner de arranque en el panel y borra
+     * SOLO su propio panel, sin tocar lv_scr_act().  Se le espera porque el
+     * launcher dibuja en la misma pantalla: si arrancara a la vez, los dos
+     * arboles de objetos se pisarian.  16 KB de pila: crea etiquetas LVGL y usa
+     * un sprintf con un buffer de 80 bytes, y la hebra muere al terminar. */
+    lanzar_y_esperar(bootTask, 16384, "boot");
+
+    /* 2. El launcher, en hebra propia y SIN esperarlo.  elf_run() ejecuta el app
+     * sobre la pila de quien lo llama, asi que necesita una hebra que pueda
+     * morir con el: el exit() del app es kill(gettid()) y kill() suelta el bloque
+     * de PSRAM.  RESCHED_NO para que main() siga colocando el arranque. */
+    if (SYSERR == ready(create(launcherTask, LAUNCHER_STK, INITPRIO,
+                               "launcher", 0), RESCHED_NO))
     {
-        /* Pila de 16 KB, no INITSTK (64 KB): el heap de L2MEM del P4 son ~432
-         * KB y las hebras ya vivas dejan poco sitio, asi que una hebra de
-         * 64 KB se llevaba todo y la shell no podia ni crear un comando.  El
-         * pico medido de esta hebra es ~900 B. */
-        nettid = create(netBootTask, 16384, INITPRIO, "netboot", 0);
-
-        if (SYSERR == nettid)
-        {
-            kprintf("WARNING: Failed to create netboot\r\n");
-        }
-        else
-        {
-            ready(nettid, RESCHED_NO);
-        }
+        kprintf("WARNING: Failed to create launcher\r\n");
     }
 
-    /* La tarea de arranque pinta el booteo y, al volver de su funcion,
-     * userret()->kill()->send(parent) avisa a esta hebra.  dashTask espera ese
-     * aviso para no pisar el banner mientras bootTask aun dibuja.  */
-    ready(create(bootTask, INITSTK, INITPRIO, "bootlcd", 0), RESCHED_YES);
-    sleep(500);
-    int child = create(p4demoTask, 8192, INITPRIO, "dash", 0);
-    irqmask im;
-    while (recvclr() != NOMSG);
-    im = disable();
-    ready(child, RESCHED_YES);
-    restore(im);
+    /* 3. La red, con gate.  netBootTask() duerme 10 s de margen para el C6 antes
+     * de tocar nada: para entonces el launcher ya termino de leer sus app.txt de
+     * la microSD, asi que el FAT y el SDIO del C6 no se mezclan en el mismo
+     * bloque SDMMC.  Si la WiFi no asocia, agota sus 5 reintentos y devuelve
+     * SYSERR: main() sigue igual y la shell sale, no se queda esperando. */
+    lanzar_y_esperar(netBootTask, 16384, "netboot");
 
-    /* Red antes que consola: la shell no nace hasta que la hebra netboot muera
-     * (netBootTask() vuelve y userret()->kill()->send(parent) le entrega su tid
-     * a esta hebra), asi que el `xsh$' aparece despues del resumen de netboot y
-     * no encima.  El mensaje de bootTask puede llegar antes y receive() consume
-     * la bandeja: por eso se anota (childdead) en lugar de dejarlo pasar, si no
-     * el bucle del panel no lo volveria a ver y el dash nunca nace. */
-    if (SYSERR != (int)nettid)
-    {
-        while (netdead == FALSE)
-        {
-            int msg = receive();
+    print_os_info();
 
-            if (msg == (int)nettid)
-            {
-                netdead = TRUE;
-            }
-            else if (msg == child)
-            {
-                childdead = TRUE;
-            }
-        }
-    }
-
+    /* 4. La consola, al final: el launcher ya esta en pantalla y la red arriba.
+     * RESCHED_NO para que main() devuelva y la shell tome el procesador cuando
+     * el planificador la elija. */
     if (SYSERR == ready(create(shell, INITSTK, INITPRIO, "SHELL", 3,
                                CONSOLE, CONSOLE, CONSOLE), RESCHED_NO))
     {
         kprintf("WARNING: Failed to create SHELL\r\n");
     }
 
-    /* Wait for boot thread to finish, then hand the panel to the dashboard. */
-    while (childdead == FALSE && receive() != child);
-    sleep(500);
-
-    /* 8 KB, no el suelo de 4 KB que da MINSTK: el panel pregunta el RSSI por
-     * su cuenta y ese RPC bomba la cola del transporte, cuyo
-     * esp_hosted_dispatch_rx() gasta 1664 B de frame (medido con
-     * -fstack-usage) mas la demux de la trama que llegue.  Su propio frame
-     * son 352 B. */
-    
-    //ready(create(dashTask, INITSTK, INITPRIO, "dash", 0), RESCHED_YES);
     return 0;
+}
+
+/**
+ * Carga el launcher de la microSD y se va con el.  elf_run() ya informa de cada
+ * fallo (sin volumen FAT, ELF que no se abre, simbolo sin exportar), asi que
+ * aqui no se repite el diagnostico ni se reintenta en bucle: un reintento
+ * escupiria las mismas lineas por la consola para siempre.
+ *
+ * Al pulsar SALIR el app llama a exit(0), que es kill(gettid()) sobre ESTA
+ * hebra: kill() suelta el bloque de PSRAM del app y la hebra desaparece.  No hay
+ * quien la relance; volver al launcher es `elf /apps/launcher/app.elf'.
+ */
+static thread launcherTask(void)
+{
+    kprintf("[launcher] elf_run %s\r\n", LAUNCHER_ELF);
+    if (SYSERR == elf_run(LAUNCHER_ELF, 0, NULL))
+    {
+        kprintf("[launcher] fallo al cargar %s\r\n", LAUNCHER_ELF);
+        return SYSERR;
+    }
+    return OK;
 }
 
  
@@ -151,11 +146,11 @@ static void print_os_info(void)
 
     /* Output Xinu memory layout */
     kprintf("%*ld bytes physical memory.\r\n",
-	    DECWIDTH, (uintptr_t)platform.maxaddr - (uintptr_t)platform.minaddr);
+        DECWIDTH, (uintptr_t)platform.maxaddr - (uintptr_t)platform.minaddr);
 #ifdef DETAIL
     kprintf("           [0x%0*X to 0x%0*X]\r\n",
-	    HEXWIDTH, (uintptr_t)platform.minaddr,
-	    HEXWIDTH, (uintptr_t)(platform.maxaddr - 1));
+        HEXWIDTH, (uintptr_t)platform.minaddr,
+        HEXWIDTH, (uintptr_t)(platform.maxaddr - 1));
 #endif
 
  
@@ -163,24 +158,24 @@ static void print_os_info(void)
     kprintf("%*ld bytes Xinu code.\r\n", DECWIDTH, (uintptr_t)&_etext - (uintptr_t)_start);
 #ifdef DETAIL
     kprintf("           [0x%0*lX to 0x%0*lX]\r\n",
-	    HEXWIDTH, (uintptr_t)_start,
-	    HEXWIDTH, (uintptr_t)&_end - 1);
+        HEXWIDTH, (uintptr_t)_start,
+        HEXWIDTH, (uintptr_t)&_end - 1);
 #endif
 
     kprintf("%*ld bytes stack space.\r\n",
-	    DECWIDTH, (uintptr_t)memheap - (uintptr_t)&_end);
+        DECWIDTH, (uintptr_t)memheap - (uintptr_t)&_end);
 #ifdef DETAIL
     kprintf("           [0x%0*lX to 0x%0*lX]\r\n",
-	    HEXWIDTH, (uintptr_t)&_end,
-	    HEXWIDTH, (uintptr_t)memheap - 1);
+        HEXWIDTH, (uintptr_t)&_end,
+        HEXWIDTH, (uintptr_t)memheap - 1);
 #endif
 
     kprintf("%*ld bytes heap space.\r\n",
             DECWIDTH, (uintptr_t)platform.maxaddr - (uintptr_t)memheap);
 #ifdef DETAIL
     kprintf("           [0x%0*lX to 0x%0*lX]\r\n\r\n",
-	    HEXWIDTH, (uintptr_t)memheap,
-	    HEXWIDTH, (uintptr_t)platform.maxaddr - 1);
+        HEXWIDTH, (uintptr_t)memheap,
+        HEXWIDTH, (uintptr_t)platform.maxaddr - 1);
 #endif
     kprintf("\r\n");
 }

@@ -10,7 +10,9 @@
  *
  * Memory regions (from the SDK's Memory_Map.ld):
  *   FLASH(rx)     0x40005000, 31M   -> code + rodata (XiP)
- *   PSRAM(rwx)    0x48000000, 31M   -> shared engine pages, then free heap
+ *   PSRAM(rwx)    0x48000000, 32M-32K -> shared engine pages, then free heap;
+ *                                  ends en 0x49FF8000, donde empieza la RAM
+ *                                  de los 32K que ulp.ld reserva al core LP
  *   HP_L2MEM(rwx) 0x4FF00000, 768K  -> kernel RAM (stack, data, bss)
  *   LP_SRAM       0x50108000, 32K   -> low-power SRAM
  *
@@ -24,7 +26,11 @@ ENTRY(_start)
 MEMORY
 {
     FLASH(rx)     : ORIGIN = 0x40005000, LENGTH = 31M
-    RAM(rwx)      : ORIGIN = 0x48000000, LENGTH = 31M
+    /* El PSRAM acaba en 0x4A000000; los ultimos 32K (0x49FF8000..) son la RAM
+     * del core LP, fijada en machine/ulp/ulp.ld.  LENGTH manda, porque
+     * _psram_free_end = ORIGIN(RAM)+LENGTH(RAM): 32M-32K deja el pool del
+     * kernel en 0x49FF8000 justo delante del hueco del LP. */
+    RAM(rwx)      : ORIGIN = 0x48000000, LENGTH = 32M-32K
     HP_L2MEM(rwx) : ORIGIN = 0x4FF00000, LENGTH = 768K
     LP_SRAM(rwx)  : ORIGIN = 0x50108000, LENGTH = 32K
 }
@@ -55,6 +61,116 @@ PROVIDE ( USB_WRAP          = 0x50080000 );
  * the identical GPIO-matrix writes and is what W1 proved on this board. */
 PROVIDE ( esp_rom_gpio_connect_out_signal = gpio_matrix_out );
 PROVIDE ( esp_rom_gpio_connect_in_signal  = gpio_matrix_in  );
+
+/* ---- el runtime del compilador es el mask ROM ----------------------
+ * El P4 no tiene doble precision: la prueba esta en placa.  `java FloatTest'
+ * saltaba con mcause=2 (instruccion ilegal), mepc=0x4000539a y
+ * mtval=0x7a07b787 --que es, palabra por palabra, el `fld' (cargar doble) con
+ * el que libgcc.a implementa __fixunsdfsi en esta multilib.  El core levanta
+ * trap hasta con las instrucciones D; las de simple precision si las ejecuta
+ * (mstatus.FS llegaba a 3, FPU activada).
+ *
+ * Las extensiones si que conviven con el RVC: el propio __ashldi3 que arrastra
+ * libgcc (sll/or/mv de 16 bits) lo ejecuta a diario la capa de control
+ * esp_hosted con la WiFi funcionando, y el cuerpo al que salta el ROM para
+ * ets_clk_get_xtal_freq --que llama el SBL en cada arranque-- empieza con un
+ * `li a5' comprimido (0x47fd).  Es decir: el -march=rv32imafc del build es
+ * conservador con 'c', pero el D del libgcc no existe.
+ *
+ * La solucion no es escribir las rutinas, es NO enlazarlas del toolchain:
+ * Espressif compila el mismo libgcc dentro del ROM (core/esp_rom/esp32p4/ld/
+ * esp32p4.rom.eco5.libgcc.ld, valido para "ECO >= 5"; el ECO de ESTA placa
+ * esta medido con `memdump -f' sobre el kernel corriendo: _rom_eco_version
+ * 0x4fc00014 = 7 y _rom_chip_id 0x4fc00010 = 0x12) y por eso aqui se replican
+ * TODAS sus direcciones y platformVars deja -lgcc fuera del enlace.  Con
+ * -lgcc dentro no basta con aliasar: PROVIDE no impide que ld abra el archivo
+ * y su definicion fuerte pisa el alias --asi se col6 __divdf3 en flash pese a
+ * estar aliasado.  Sin libgcc, cualquier hueco que quede se ve como
+ * "undefined reference" en el enlace, no como un trap a 20 segundos de
+ * distancia en la placa.
+ *
+ * El ROM expone el grupo como una tabla de trampolines: cada entrada es un
+ * `jal x0' de 4 bytes a 0x4fc13xxx/0x4fc16xxx, donde esta el cuerpo de
+ * software (comprobado: desde 0x4fc00738 salta a 0x4fc1645a, y desde
+ * 0x4fc00778 a 0x4fc16d24).  Coste en la imagen: 0 bytes.
+ *
+ * Unica excepcion: __truncdfsf2 (doble->simple) no esta en el ROM ni en el
+ * libgcc; esa si se escribe, en lib/libxc/compiler_rt.c. */
+PROVIDE ( __absvdi2       = 0x4fc00730 );
+PROVIDE ( __absvsi2       = 0x4fc00734 );
+PROVIDE ( __adddf3        = 0x4fc00738 );  /**< a+b                 */
+PROVIDE ( __addvdi3       = 0x4fc0073c );
+PROVIDE ( __addvsi3       = 0x4fc00740 );
+PROVIDE ( __ashldi3       = 0x4fc00744 );  /**< << 64 bits          */
+PROVIDE ( __ashrdi3       = 0x4fc00748 );  /**< >> arit. 64 bits    */
+PROVIDE ( __bswapdi2      = 0x4fc0074c );
+PROVIDE ( __bswapsi2      = 0x4fc00750 );
+PROVIDE ( __clear_cache   = 0x4fc00754 );
+PROVIDE ( __clrsbdi2      = 0x4fc00758 );
+PROVIDE ( __clrsbsi2      = 0x4fc0075c );
+PROVIDE ( __clzdi2        = 0x4fc00760 );
+PROVIDE ( __clzsi2        = 0x4fc00764 );
+PROVIDE ( __cmpdi2        = 0x4fc00768 );
+PROVIDE ( __ctzdi2        = 0x4fc0076c );
+PROVIDE ( __ctzsi2        = 0x4fc00770 );
+PROVIDE ( __divdc3        = 0x4fc00774 );
+PROVIDE ( __divdf3        = 0x4fc00778 );  /**< a/b                 */
+PROVIDE ( __divdi3        = 0x4fc0077c );
+PROVIDE ( __divsc3        = 0x4fc00780 );
+PROVIDE ( __divsi3        = 0x4fc00784 );
+PROVIDE ( __eqdf2         = 0x4fc00788 );  /**< == -> -1/0/1        */
+PROVIDE ( __extendsfdf2   = 0x4fc0078c );  /**< (double)float       */
+PROVIDE ( __ffsdi2        = 0x4fc00790 );
+PROVIDE ( __ffssi2        = 0x4fc00794 );
+PROVIDE ( __fixdfdi       = 0x4fc00798 );  /**< (long long)double   */
+PROVIDE ( __fixdfsi       = 0x4fc0079c );  /**< (int)double         */
+PROVIDE ( __fixsfdi       = 0x4fc007a0 );
+PROVIDE ( __fixunsdfsi    = 0x4fc007a4 );  /**< (unsigned)double    */
+PROVIDE ( __fixunssfdi    = 0x4fc007a8 );
+PROVIDE ( __fixunssfsi    = 0x4fc007ac );
+PROVIDE ( __floatdidf     = 0x4fc007b0 );  /**< (double)long long   */
+PROVIDE ( __floatdisf     = 0x4fc007b4 );
+PROVIDE ( __floatsidf     = 0x4fc007b8 );  /**< (double)int         */
+PROVIDE ( __floatundidf   = 0x4fc007bc );
+PROVIDE ( __floatundisf   = 0x4fc007c0 );
+PROVIDE ( __floatunsidf   = 0x4fc007c4 );  /**< (double)unsigned    */
+PROVIDE ( __gcc_bcmp      = 0x4fc007c8 );
+PROVIDE ( __gedf2         = 0x4fc007cc );  /**< >=                  */
+PROVIDE ( __gtdf2         = 0x4fc007d0 );  /**< >                   */
+PROVIDE ( __ledf2         = 0x4fc007d4 );  /**< <=                  */
+PROVIDE ( __lshrdi3       = 0x4fc007d8 );  /**< >> logico 64 bits   */
+PROVIDE ( __ltdf2         = 0x4fc007dc );  /**< <                   */
+PROVIDE ( __moddi3        = 0x4fc007e0 );
+PROVIDE ( __modsi3        = 0x4fc007e4 );
+PROVIDE ( __muldc3        = 0x4fc007e8 );
+PROVIDE ( __muldf3        = 0x4fc007ec );  /**< a*b                 */
+PROVIDE ( __muldi3        = 0x4fc007f0 );
+PROVIDE ( __mulsc3        = 0x4fc007f4 );
+PROVIDE ( __mulsi3        = 0x4fc007f8 );
+PROVIDE ( __mulvdi3       = 0x4fc007fc );
+PROVIDE ( __mulvsi3       = 0x4fc00800 );
+PROVIDE ( __nedf2         = 0x4fc00804 );  /**< !=                  */
+PROVIDE ( __negdf2        = 0x4fc00808 );  /**< -a                  */
+PROVIDE ( __negdi2        = 0x4fc0080c );
+PROVIDE ( __negvdi2       = 0x4fc00810 );
+PROVIDE ( __negvsi2       = 0x4fc00814 );
+PROVIDE ( __paritysi2     = 0x4fc00818 );
+PROVIDE ( __popcountdi2   = 0x4fc0081c );
+PROVIDE ( __popcountsi2   = 0x4fc00820 );
+PROVIDE ( __powidf2       = 0x4fc00824 );
+PROVIDE ( __subdf3        = 0x4fc00828 );  /**< a-b                 */
+PROVIDE ( __subvdi3       = 0x4fc0082c );
+PROVIDE ( __subvsi3       = 0x4fc00830 );
+PROVIDE ( __ucmpdi2       = 0x4fc00834 );
+PROVIDE ( __udivdi3       = 0x4fc00838 );
+PROVIDE ( __udivmoddi4    = 0x4fc0083c );
+PROVIDE ( __udivsi3       = 0x4fc00840 );
+PROVIDE ( __udiv_w_sdiv   = 0x4fc00844 );
+PROVIDE ( __umoddi3       = 0x4fc00848 );
+PROVIDE ( __umodsi3       = 0x4fc0084c );
+PROVIDE ( __unorddf2      = 0x4fc00850 );  /**< NaN / ambos NaN     */
+PROVIDE ( __extenddftf2   = 0x4fc00854 );
+PROVIDE ( __trunctfdf2    = 0x4fc00858 );
 
 SECTIONS
 {

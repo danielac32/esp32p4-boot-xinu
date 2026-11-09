@@ -39,12 +39,17 @@ DEFS     += -DTARGET_SOC_ESP32P4
 # red.  Se vuelve a activar si el DHCP falla.
 #DEFS     += -DENABLE_DHCP_TRACE
 
-# LVGL needs its own directory on the include path so that
-# lv_conf_internal.h's __has_include("lv_conf.h") finds lvgl/lv_conf.h
-# (otherwise it falls back to a relative "../../lv_conf.h" that does not
-# resolve from the compile directory).
-# DISABLED: LVGL no forma parte del build minimo.
-#INCLUDE  += -I$(TOPDIR)/lvgl
+# LVGL vuelve dentro del arbol (2026-11-05) PERO SIN el JVM: es la libreria
+# sobre la que se escriben las apps en C, asi que sus simbolos tienen que estar
+# enlazados en el kernel para poder exportarlos (system/exports.c).  Necesita su
+# propio directorio en el include path para que lv_conf_internal.h resuelva
+# __has_include("lv_conf.h"); sin eso cae en la ruta relativa "../../lv_conf.h",
+# que no existe desde el directorio de compilacion.
+# Ojo al orden con include/lvgl.h (el header del DEVICE lvgl): INCLUDE pone
+# primero -I$(TOPDIR)/include, asi que un `#include <lvgl.h>' es el del device,
+# y la libreria se alcanza por la ruta larga `lvgl/lvgl.h' (-I$(TOPDIR) ya
+# estaba).  El puerto esta en device/lvgl/lvglport.c.
+INCLUDE  += -I$(TOPDIR)/lvgl
 
 # The FAT file system library lives in fatfs/ and uses <fat_table.h>-style
 # includes relative to its own directory.
@@ -72,21 +77,30 @@ DEFS     += -DFATFS_INC_TEST_HOOKS
 # (definido en xinu.conf); los sockets TCP/UDP/raw viven en device/ y van en
 # DEVICES.  `mailbox' acompaña a la pila: arpInit/icmpInit/rtInit mensajean por
 # mailboxAlloc/mailboxSend/mailboxReceive.
-APPCOMPS := shell apps fatfs network mailbox
+APPCOMPS := shell apps fatfs network mailbox lvgl
 
 # Extra static libraries linked into the kernel (built from lib/<name>/).
 
 # Linking data files across ABIs needs this
 LDFLAGS  += --no-warn-mismatch
 
-# La capa de control esp_hosted (espHostedCtrl.c) mueve varints protobuf de
-# 64 bits; el core es RV32IMAFDC pero el -march del build omite 'd', asi que
-# gcc no puede hacer `x << s` / `x >> s` en linea y llama a __ashldi3/__lshrdi3,
-# que viven en libgcc.  compile/Makefile ya contempla esto: con -lgcc en LDLIBS
-# enlaza con gcc y -nostdlib, sin arrastrar la libc.  El toolchain /opt/riscv32
-# tiene UNA sola multilib, o sea que el driver encuentra libgcc.a sin necesidad
-# de pasarle -march/-mabi al enlazar.
-LDLIBS   += -lgcc
+# El runtime del compilador NO viene de libgcc.a: viene del mask ROM (ver
+# compile/platforms/esp32p4/ld.script, grupo `libgccdf').  Antes se enlazaba
+# -lgcc y con eso la capa de control esp_hosted (espHostedCtrl.c) conseguia
+# __ashldi3 para sus varints protobuf de 64 bits --el core es RV32IMAFDC pero
+# el -march del build omite 'd' y 'c', asi que gcc no puede hacer `x << s' en
+# linea y llama a la helper.
+#
+# Se quita -lgcc porque esa multilib esta construida con D y C: sus rutinas df
+# cargan el doble con `fld`, que en el P4 es instruccion ILEGAL (lo demostro
+# `java FloatTest': mcause=2 en __fixunsdfsi, mtval=0x7a07b787).  Y PROVIDE no
+# protege: el alias del ROM no impide que ld abra el archivo, y la definicion
+# fuerte del miembro pisa el alias (__divdf3 acabo estando en flash pese a
+# estar aliasado).  Sin -lgcc, si algun dia gcc pide una helper que el ROM no
+# exporta, el enlace falla con "undefined reference" en lugar de colgar la
+# placa a los 20 segundos; las que faltan se escriben entonces en
+# lib/libxc/compiler_rt.c, como ya se hizo con __truncdfsf2.
+LDLIBS   +=
 
 # Embedded Xinu device drivers to build into the kernel image.
 # CLEAN MINIMAL BOOT: serial driver (tty over UART0) + PSRAM (memory/stack)
@@ -104,7 +118,12 @@ LDLIBS   += -lgcc
 #   nativa; reusa el transporte esp_hosted de sdio-esp32p4).
 # + raw / udp / tcp (W3: los sockets de la pila nativa de Xinu; cada instancia
 #   del devtab es una entrada de su tabla, rawtab/udptab/tcptab).
-DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat gpio i2c touch power audio sdio-esp32p4 espeth-esp32p4 raw udp tcp telnet
+# + lvgl: DENTRO otra vez (2026-11-05), pero solo como libreria del kernel: lo
+#   que se aparco con ella (el JVM, device/jvm, el launcher y las apps java)
+#   sigue en parked/java-gui/.  Sin lvgl enlazado no hay simbolos lv_* que
+#   exportar a las apps ELF.
+# + jvm: APARCADO en parked/java-gui/ (ver su README.md).
+DEVICES  := tty uart-esp32p4 psram nam lcd-esp32p4 sdmmc-esp32p4 sdblock-esp32p4 fat gpio i2c touch power lvgl audio sdio-esp32p4 espeth-esp32p4 raw udp tcp telnet
 
 # ============================================================================
 # Imágenes de arranque del P4: SBL (bootloader de 2ª etapa) y ULP (firmware
@@ -160,7 +179,11 @@ PLATCLEAN := machineclean
 $(BOOTIMAGE): $(SBL_BIN) $(ULP_BIN)
 
 # Flasheo de las tres imágenes en sus offsets del mapa de memoria del P4:
-# SBL @ 0x2000, kernel @ 0x5000, ULP @ 0x100000 (flash de 16 MB).
+# SBL @ 0x2000, kernel @ 0x5000, ULP @ 0x400000 (flash de 16 MB).
+# El ULP estuvo en 0x100000; se subió a 4 MB para que el kernel crezca sin
+# pisarlo (LVGL y lo que viene detrás).  La cota vive en tres sitios que tienen
+# que cuadrar: este offset, __ulp_entry_point (machine/sbl/SBL.ld) y el ORIGIN
+# de FLASH de machine/ulp/ulp.ld.  `syscheck flash' lo comprueba en placa.
 PORT ?= /dev/ttyACM0
 BAUD ?= 460800
 .PHONY: flash
@@ -168,12 +191,12 @@ flash: $(BOOTIMAGE) $(SBL_BIN) $(ULP_BIN)
 	$(ESPTOOL) --chip esp32p4 -p $(PORT) -b $(BAUD) \
 		--before=default-reset --after=hard-reset \
 		write-flash --flash-mode dio --flash-freq 80m --flash-size 16MB \
-		0x2000 $(SBL_BIN) 0x5000 $(BOOTIMAGE) 0x100000 $(ULP_BIN)
+		0x2000 $(SBL_BIN) 0x5000 $(BOOTIMAGE) 0x400000 $(ULP_BIN)
 
 .PHONY: flashxinu
 flashxinu: $(BOOTIMAGE)
 	@echo -e "\tFlashing Xinu kernel @ 0x5000"
 	$(ESPTOOL) --chip esp32p4 -p $(PORT) -b $(BAUD) \
-		--before=default-reset --after=hard-reset \
+		--no-stub --before=default-reset --after=hard-reset \
 		write-flash --flash-mode dio --flash-freq 80m --flash-size 16MB \
 		0x5000 $(BOOTIMAGE)

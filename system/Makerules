@@ -41,6 +41,30 @@ C_FILES += debug.c stack.c
 # Syscall table for the ecall gate (system/arch/riscv/trap.c)
 C_FILES += sysent.c  
 
+# Tabla de simbolos que el kernel regala a las apps ELF (include/exports.h).
+# Es obligatoriamente un componente del kernel, no de la shell: con
+# --gc-sections solo existe lo que alguien referencia, y las referencias de
+# exports.c son la raiz que mete en la imagen a suspend(), malloc(), fl_fopen()
+# y a las ~1.000 funciones de LVGL que aun no llama nadie.
+C_FILES += exports.c
+
+# Cargador de apps ELF (include/elfload.h): coloca un ET_REL RV32 en PSRAM,
+# resuelve contra la tabla de arriba y salta a su '_start' con argc/argv.
+# Tambien del kernel: 'elf' (shell/xsh_elf.c) es el cliente, y el cargador
+# necesita a elf_exit() vivita para que 'exit' del app sea su trampa.
+C_FILES += elfload.c
+
+# Registro de apps (launcher <-> apps ELF): tabla fija y funciones exportadas.
+C_FILES += appmgr.c
+
+# Candado global del sistema de ficheros FAT/microSD.
+C_FILES += fslock.c
+
+# Reproductor MP3 (include/mp3.h): minimp3 embebido en el kernel, salida PCM
+# estereo a 48 kHz lista para escribir en /dev/audio0.  Va en el kernel y no
+# en la app porque el texto de una app ELF corre sin cache de instrucciones.
+C_FILES += mp3.c
+
 # Init system + servicios supervisados
 
 

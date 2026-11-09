@@ -1,2 +1,12 @@
-See ./development/Documentation.rst for information about the Embedded
-Xinu documentation itself.
+Xinu-P4.2 documentation
+========================
+
+- `xinu-p4-dashboard.html`: tablero general del port (estado, memoria, núcleos, dispositivos, red, ELF/Java, syscheck, conf.c, roadmap).
+- `manual/`: manual técnico en profundidad (port RISC-V/ESP32-P4, kernel, build/linker/memoria, devices, FS, WiFi/red, shell, ELF/PSRAM, ejemplos/launcher/apps, manual LVGL). Abrir `manual/index.html` (o `index.html` en esta carpeta).
+
+Notas operativas (medidas en placa / diseño)
+--------------------------------------------
+- **Launcher e íconos lentos al cargar (5 apps):** los íconos son JPEG (`/apps/<app>/icon.jpg`) mostrados por LVGL vía `S:`+SJPG (decode software) y se leen/decodifican desde SD en core0, uno a uno, por eso no aparecen juntos. Mover `lvglui` a core1 no es la solución práctica: LVGL no es reentrante, las apps llaman su API desde core0 bajo `lvgl_lock` (monitor no SMP-safe) y core1 no corre el runtime Xinu (API de buzón dibujada, no implementada; ver `README_CORE1.md`). La mejora real es **cachear los íconos ya decodificados en PSRAM como bitmap RGB565** (una vez, al escanear `/apps/*/app.txt`) o guardarlos pre-convertidos como `.bin` RGB565 para saltar el decode JPEG. ~18 KB por ícono 96x96 RGB565.
+- **LCD y DMA:** el flush LVGL va por SPI2/GPSPI2 PIO. Se probó AXI-DMA (SPI2 está en AXI-GDMA 0x5008A000, `peri_out_sel`=1 `gpspi_2`, canal OUT 0) con secuencia tipo referencia, pero no se estabilizó (`blit DMA fallo, PIO` + fallback); quedó en PIO. Para reintentar: imitar el patrón I2S — reservar desc/buffer en páginas PSRAM `NOLOAD` del linker (no heap/BSS), CPU por `0x88` directo y DMA por `0x48`, `fence rw,rw` antes de ceder `owner`. Audio (AHB-DMA↔I2S0, `.audioshare`) es la referencia que funciona.
+
+Development info: `./development/Documentation.rst` (si aplica).

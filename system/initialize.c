@@ -72,7 +72,12 @@ void nulluser(void)
     /* null thread has nothing else to do but cannot exit  */
     while (TRUE)
     {
-    // sleep(100);
+        /* pause() es wfi: no toca el estado de la hebra, asi que el tid 0 sigue
+         * en la readylist y dequeue() nunca la ve vacia.  Con sleep(100) el nulo
+         * pasa a THRSLEEP y, si todas las demas hebras estan bloqueadas,
+         * resched() saca EMPTY (-2) de la readylist, indexa thrtab[-2] y hace
+         * ctxsw a una pila basura con las IRQ enmascaradas: ni el tick del reloj
+         * vuelve a disparar y la placa se queda muerta para siempre. */
         pause();
     }
 }

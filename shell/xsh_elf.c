@@ -1,10 +1,17 @@
-/*
- * xsh_elf.c — Shell command: load and run an ELF32 (RISC-V PIE) from the SD.
+/**
+ * @file xsh_elf.c
  *
- *   elf <path> [args...]
+ * 'elf': el unico comando de apps ELF del kernel.
  *
- * Uses system/elfload.c (GOT relocation + .init_array) and runs the entry
- * point in a task with INITSTK.  The app calls the kernel via ecall/syscall.
+ *   elf ARCHIVO.elf [arg...]
+ *
+ * El comando busca el ELF en la microSD, y el cargador (system/elfload.c) lo
+ * coloca en PSRAM, lo enlaza contra system/exports.c, le parchea las
+ * relocaciones y salta a su '_start' con argc/argv.  El app corre en la hebra
+ * de este comando; su 'exit' es kill(gettid()) y es kill() del kernel quien
+ * suelta el bloque de PSRAM, asi que al morir la hebra del comando el prompt
+ * vuelve y la PSRAM queda libre.  Si el app devolviera sin exit() --un _start
+ * propio--, elf_run() suelta el bloque y aqui se informa.
  */
 /* Embedded Xinu, Copyright (C) 2026.  All rights reserved. */
 
@@ -12,65 +19,47 @@
 #include <stdio.h>
 #include <string.h>
 #include <kernel.h>
-#include <thread.h>
-#include <device.h>
-#include <memory.h>
-#include <elfload.h>
 #include <fsutil.h>
-
-#define ELF_STK  INITSTK
+#include <elfload.h>
 
 shellcmd xsh_elf(int nargs, char *args[])
 {
-    void *entry;
-    uint32_t base = 0, size = 0;
-    char path[FS_PATH_MAX];
-    tid_typ child;
+    char ruta[FS_PATH_MAX];
 
-    if (nargs < 2) {
-        printf("Usage: %s <path.elf> [args...]\n", args[0]);
+    if (nargs < 2 || strcmp(args[1], "--help") == 0)
+    {
+        printf("Usage: elf ARCHIVO.elf [arg...]\r\n\r\n");
+        printf("Description:\r\n");
+        printf("\tCarga un ELF RV32 (ET_REL, 'ld -r') de la microSD, aplica los\r\n");
+        printf("\texports del kernel y ejecuta su '_start' en la hebra de este\r\n");
+        printf("\tcomando.  El 'exit' del app es kill(gettid()): la hebra muere\r\n");
+        printf("\ty el kernel suelta su bloque de PSRAM.\r\n");
+        printf("\tLos argumentos despues de la ruta son del app (argv[1..]).\r\n");
+        return OK;
+    }
+
+    if (!fs_mounted())
+    {
+        fprintf(stderr, "elf: no hay volumen FAT montado; usa `sd'\r\n");
         return SYSERR;
     }
 
-    if (!fs_resolve(args[1], path, sizeof(path))) {
-        fprintf(stderr, "elf: path too long\n");
+    if (!fs_resolve(args[1], ruta, sizeof(ruta)))
+    {
+        fprintf(stderr, "elf: ruta demasiado larga\r\n");
         return SYSERR;
     }
 
-    entry = elf_load(path, &base, &size);
-    if (entry == 0) {
-        fprintf(stderr, "elf: no se pudo cargar %s\n", path);
+    if (fl_is_dir(ruta))
+    {
+        fprintf(stderr, "elf: %s: es un directorio\r\n", ruta);
         return SYSERR;
     }
 
-    printf("elf: cargado %s @ %p (base=%p, size=%lu)\n",
-           path, entry, (void *)base, (unsigned long)size);
-
-    /* Pasar argumentos adicionales al programa ELF (args[2..nargs-1]) */
-    int elf_argc = nargs - 2;
-    char **elf_argv = (elf_argc > 0) ? &args[2] : NULL;
-
-    /* Lanza el entry point como tarea con sus argumentos */
-    child = create((void (*)(void))entry, ELF_STK, INITPRIO, "ELF", 3,
-                   entry, elf_argc, elf_argv);
-    if (SYSERR == child) {
-        printf("elf: no se pudo crear la tarea\n");
-        /* Liberar el bloque ELF ya que no se pudo crear la tarea */
-        psram_freemem((void *)base, size);
+    if (SYSERR == elf_run(ruta, nargs - 2, &args[2]))
+    {
         return SYSERR;
     }
-
-    /* Marcar la tarea como ELF para liberar el bloque PSRAM al salir */
-    thrtab[child].elf_task = TRUE;
-    thrtab[child].elf_img = (void *)base;
-    thrtab[child].elf_size = size;
-
-    while (recvclr() != NOMSG);
-    ready(child, RESCHED_YES);
-
-    /* Espera a que termine (exit syscall envia el tid al padre). */
-    while (receive() != child);
-
-    printf("elf: terminado\n");
+    printf("elf: %s volvio sin exit(); su PSRAM quedo libre\r\n", ruta);
     return OK;
 }

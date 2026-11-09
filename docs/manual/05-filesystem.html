@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V — Sistema de archivos (FAT/microSD) | Manual Xinu-P4.2</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}body{margin:0 auto;max-width:1140px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}.mast a:hover{background:var(--accent2);color:#fff}.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule)}h3{font-size:17px;margin:15px 0 4px;color:var(--accent2)}
+p,li{margin:5px 0}ul,ol{margin:5px 0 5px 20px;padding:0}code{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.6px/1.45 var(--mono);white-space:pre-wrap}.c{color:#b7a98e}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}.warn{border-left-color:#b06500}.danger{border-left-color:#8b2e2e}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0;background:var(--hi)}th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.file{font:700 12.5px var(--mono);color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo V — Sistema de archivos (FAT / microSD)</h1></div>
+<main>
+<div class="note"><b>Objetivo.</b> Explicar la cadena de almacenamiento, la API <code>fl_*</code>, la concurrencia (FatFs + bus SDMMC compartido con WiFi), las trampas reales del port y cómo lo usan shell, kernel y apps. <b>Código:</b> <code>device/sdmmc-esp32p4</code>, <code>device/sdblock-esp32p4</code>, <code>device/fat</code>, <code>fatfs/</code>, <code>device/lvgl/lvglfs.c</code>.</div>
+
+<h2>1. Cadena y montaje</h2>
+<pre>microSD (SDMMC slot 0)  +  ESP32-C6 WiFi (slot 1)
+        │                          │
+        └──── SDMMC host (compartido, <span class="c">sdmmcBusLock</span>) ────┘
+                        │
+                     sdblock (SD0, bloques 512 B)
+                        │
+                     fat (FAT0) + <span class="c">fatfs/fl_*</span>  → volumen montado al init si hay tarjeta
+                        │
+                  lvglfs (letra S:)  → LVGL carga S:/... (imágenes SJPG)</pre>
+<p>Orden en <code>xinu.conf/devtab</code>: <code>SDMMC0</code> antes de <code>SD0</code>, <code>SD0</code> antes de <code>FAT0</code>. <code>sysinit()</code> llama <code>init</code> de cada device; <code>fatInit</code> adjunta el medio y monta si está disponible. <code>fs_mounted()</code> (fsutil) indica si hay volumen. Rutas absolutas estilo <code>/apps/miapp/app.txt</code>, <code>/wifi.txt</code>; <code>fs_resolve</code> normaliza (colapsa <code>.</code>/<code>..</code>).</p>
+
+<h2>2. API <code>fl_*</code> (FatFs/filelib)</h2>
+<p>Cabecera: <code>fat_filelib.h</code>. Uso directo en kernel, shell y apps ELF (exportada).</p>
+<table>
+<tr><th>Operación</th><th>Funciones</th><th>Notas</th></tr>
+<tr><td>Abrir/cerrar</td><td><code>fl_fopen(path,mode)</code>, <code>fl_fclose</code>, <code>fl_fflush</code></td><td>Flags incluyen lectura/escritura/append/binario/crear según <code>FL_FILE</code>.</td></tr>
+<tr><td>Leer/escribir</td><td><code>fl_fread</code>, <code>fl_fwrite</code>, <code>fl_fgetc/fgets/fputc/fputs</code></td><td>Búfer de sector interno por fichero (512 B). Lecturas grandes: trocear y ceder (como <code>elf_run</code>).</td></tr>
+<tr><td>Posición</td><td><code>fl_fseek</code>, <code>fl_ftell</code>, <code>fl_feof</code></td><td></td></tr>
+<tr><td>Directorios</td><td><code>fl_opendir/readdir/closedir</code>, <code>fl_createdirectory</code>, <code>fl_removedirectory</code>, <code>fl_is_dir</code>, <code>fl_listdirectory</code></td><td></td></tr>
+<tr><td>Borrado</td><td><code>fl_remove</code></td><td>Úsalo antes de sobrescribir (ver trampas).</td></tr>
+</table>
+
+<h2>3. Concurrencia: dos niveles de candado</h2>
+<ul>
+<li><b>FatFs interno:</b> <code>fl_attach_locks</code> / <code>fatmon</code> (monitor reentrante) serializa operaciones <code>fl_*</code>. Permite llamar desde distintos contextos sin corromper el estado de la librería (las llamadas se toman/sueltan por operación).</li>
+<li><b>Bus SDMMC compartido:</b> <code>sdmmcBusInit/Lock/Unlock</code> (<code>system/sdmmcbus.c</code>) serializa el controlador entre <b>microSD (slot 0)</b> y <b>ESP32-C6 WiFi (slot 1)</b>. E/S de ficheros compite con SDIO → latencia variable. En audio/UI/red, trocea lecturas largas y haz <code>sleep/yield</code> para no ahogar reproducción ni red.</li>
+</ul>
+
+<h2>4. Trampas reales (medidas) — disciplina obligatoria</h2>
+<div class="danger note">
+<ul>
+<li><b>NO trunca al sobrescribir con menos bytes.</b> Si abres un fichero existente y escribes menos de lo que tenía, queda <b>cola vieja</b> y el tamaño antiguo. <b>Mitigación:</b> <code>fl_remove(ruta)</code> antes de <code>fl_fopen(ruta,"w")</code> cuando sustituyes contenido completo (patrón en <code>httpapi</code> PUT, <code>udpserver</code>, <code>settings</code> al guardar <code>/wifi.txt</code>). Toda ruta nueva que sobrescriba debe seguir esto.</li>
+<li><b>No existe <code>fl_rename()</code>.</b> No hay publicación atómica: copia → verifica tamaño → borra origen/temporal según el caso (con cuidado de candados).</li>
+<li><b>Rutas inválidas / sin montar:</b> comprueba <code>fs_mounted()</code> y resuelve con <code>fs_resolve</code>; maneja errores de <code>fl_fopen/opendir</code>.</li>
+</ul>
+</div>
+
+<h2>5. Quién usa el sistema de archivos</h2>
+<table>
+<tr><th>Quién</th><th>Para qué / cómo</th></tr>
+<tr><td>Shell (<code>xsh_ls/cat/cp/mv/rm/elf/httpd/...</code>)</td><td>Gestión de ficheros y lectura de ELF; <code>httpd</code> sirve estáticos y API REST (PUT con <code>remove</code> previo).</td></tr>
+<tr><td><code>elfload</code></td><td>Lee el <code>.elf</code> (ET_REL) desde SD en trozos y lo carga en PSRAM.</td></tr>
+<tr><td>Launcher</td><td>Escanea <code>/apps/*/app.txt</code>, carga iconos vía LVGL <code>S:</code>.</td></tr>
+<tr><td>Apps (<code>musica</code>, <code>settings</code>)</td><td>MP3/listas desde SD; <code>settings</code> lee/mezcla/reescribe <code>/wifi.txt</code> (borrando antes de escribir) y usa <code>wifinet</code> para conectar.</td></tr>
+<tr><td>LVGL (<code>lvglfs</code>)</td><td>Acceso <code>S:/ruta</code> a ficheros (p. ej. SJPG); decode CPU+I/O.</td></tr>
+<tr><td>Red (<code>netboot</code>/credenciales)</td><td>Puede leer configuración (p. ej. <code>/wifi.txt</code>) según flujo.</td></tr>
+</table>
+
+<pre><span class="c">/* Patrón seguro de sobrescritura */</span>
+fl_remove("/wifi.txt");
+void *f = fl_fopen("/wifi.txt","w");
+if (f) { fl_fwrite(buf,1,len,f); fl_fclose(f); }</pre>
+
+</main>
+</body>
+</html>

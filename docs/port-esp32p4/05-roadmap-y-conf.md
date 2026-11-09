@@ -104,9 +104,15 @@ En reposo quedan **23 buffers libres de 24**; con un `ping` sostenido baja a
 **16 de 24**, y `rx_drops` se quedó en **0**.  Es decir: para el uso actual
 (`ping`, `telnet`, `httpd` de una página) los 24 buffers aguantan con margen, y
 el escenario de 164 exigidos por el comentario no se ha dado porque las colas
-ARP/RAW no se llenan con ese tráfico.  La propuesta C sigue en pie por otra
-razón: en cuanto se porta `udpserver` (#56) o `httpd` con ficheros (#57) y
-concurren varios clientes, 8 buffers de colchón son pocos.  El coste real por
+ARP/RAW no se llenan con ese tráfico.  Con los dos servidores ya portados y en
+marcha -- `httpd` con ficheros (#57, cerrado el 2026-11-04, ver §7) y `udpserver`
+(#56, cerrado también el 2026-11-04, §7 de [03](03-red-y-wifi.md)) -- el motivo
+de la propuesta C sigue siendo el mismo pero ha cambiado de sitio: **cada servidor
+atiende de una en una**, así que la concurrencia real llegará cuando se suban
+`NTCP`/`NUDP` o haya varias hebras servidoras, no hoy.  Queda una medida pendiente
+y honesta: **el pool no se llegó a mirar durante una subida de firmware**, que es
+el escenario donde una FAT lenta deja tramas entrantes sin leer.
+El coste real por
 buffer medido es **1632 B**, y el cálculo lo reproduce: `bfpalloc` hace
 `roundword(NET_MAX_PKTLEN + sizeof(struct packet)) + sizeof(struct poolbuf)` =
 `1624 + 8` ([include/bufpool.h:49](../../include/bufpool.h#L49),
@@ -130,7 +136,7 @@ que `xinu.conf` declare cada una **una sola vez** (con `#ifndef` en la copia) y 
 
 ### 1.3 `FLASH LENGTH = 31M` frente a 16 MB físicos
 
-`compile/platforms/esp32p4/ld.script:26` declara 31 MB de flash; la placa tiene 16 MB
+`compile/platforms/esp32p4/ld.script:28` declara 31 MB de flash; la placa tiene 16 MB
 (`--flash-size 16MB`, `platformVars:170`). El enlazado no avisará si el kernel pasa de 16 MB:
 petaría en el flasheo o, peor, en tiempo de arranque. **Propuesta**: `LENGTH = 15M` (deja el
 MB que ocupa el ULP y su hueco) para que el `ld` corte. El `RAM(rwx) LENGTH = 31M` sí es
@@ -189,8 +195,12 @@ consola sin escribir funcionalidad).
    timeouts de la pila y a cualquier `udelay()` - y la que más validación pide
    después (regresión AGENTS §4 + `ping -c 200` + `p4clk.py`).
 1. `RAW_IBLEN` 100 → 32 **y** `NET_POOLSIZE` 24 → 96 (§1.1).  Baja de prioridad
-   tras medir 23/24 libres en reposo y `drops 0`; se hace cuando se porten
-   `udpserver`/`httpd` con concurrencia.
+   tras medir 23/24 libres en reposo y `drops 0`.  Los dos servidores ya están
+   portados (`udpserver` #56 y `httpd` #57, ambos cerrados el 2026-11-04), pero
+   **cada uno atiende de una en una**, así que el disparador real no es "que
+   existan" sino la concurrencia: subir `NTCP`/`NUDP` o lanzar varias hebras
+   servidoras -- y, mientras tanto, medir el pool **durante una subida de
+   firmware**, que es el caso con la FAT ocupada y tramas entrantes sin leer.
 2. Registrar `curl`, `wget`, `ip` (§1.6).  (`syscheck` **sí** se registró y se
    midió; ver documento 06.)
 3. Duplicados de `conf.h` → fuente única en `xinu.conf` (§1.2).
@@ -337,6 +347,11 @@ Tu descripción: "Xinu recibe la imagen, reinicia, el bootloader ve la imagen en
 flash y salta". Es la arquitectura correcta, y el árbol ya tiene casi todos los ingredientes.
 Falta el aplicador.
 
+**Estado a 2026-11-04**: la primera mitad -- recibir la imagen por la red y dejarla en la SD --
+**está hecha y medida** (`udpserver`, §7 de [03](03-red-y-wifi.md)); `FW_END` la responde con
+`apply=blocked` porque sigue sin existir quién la aplique.  Las tres piezas de abajo son el
+diseño tal como se escribió; la Pieza 1 es la única ya ejecutada.
+
 ### 6.1 Por qué el aplicador no puede ser el kernel
 
 El kernel se ejecuta **XIP desde flash** (`0x40005000`, ver [01 §1](01-memoria-nucleos.md)).
@@ -348,14 +363,33 @@ tú mismo propusiste. **Usar el SBL (o una etapa pegada al SBL) como aplicador e
 
 ### 6.2 Diseño propuesto, tres piezas
 
-**Pieza 1 — staging (la que ya sabes hacer).**
-`udpserver` portado desde el S3 (`/home/daniel/xinu-s3-amp/shell/xsh_udpserver.c`, tarea #56)
-recibe el fichero y lo escribe en `/xinu.img` en la microSD. Hay que añadirle:
-- tamaño esperado + **CRC32** al final (el `crc32` de `libxc` ya está en el árbol),
-- un marcador `/xinu.img.ok` escrito **después** del CRC correcto (escritura atómica por renombre:
-  `/xinu.img.part` → `/xinu.img`).
-Sin ese marcador, una transferencia cortada deja una imagen basura que el bootloader puede
-programar y **matar el arranque**.
+**Pieza 1 — staging.  HECHA en placa el 2026-11-04** (tarea #56 cerrada; protocolo, medidas
+y matriz de errores en §7 de [03](03-red-y-wifi.md)).
+`shell/xsh_udpserver.c`, portado del S3, recibe la imagen por UDP en el 5000 bloque a bloque
+(960 B, stop-and-wait) y la deja en `/xinu.img` de la microSD: 315.820 B (el kernel actual)
+en 4,45 s y **verificada byte a byte** bajándola después por el `httpd`.  Lo que queda por
+añadirle sigue siendo lo mismo:
+- **CRC32** al final de la sesión (el `crc32` de `libxc` ya está en el árbol).  Hoy `FW_END`
+  comprueba la **talla**, no el contenido: el `cmp` de la prueba es del PC, no de la placa.
+- un marcador `/xinu.img.ok` escrito **después** del CRC correcto.
+
+Y una corrección de diseño obligada, porque el renombre atómico que aquí se proponía **no
+existe en este puerto**: la librería FAT del P4 no tiene `fl_rename()` (el S3 sí, y su
+comentario explica que mueve la cadena de clusters).  El sustituto que está implementado es
+`fl_remove(dest)` → `fs_copy(tmp,dest)` → **verificar la talla por el nombre final** → borrar
+el temporal, todo con el candado de la librería tomado una vez.  Si el corte cae en mitad de
+la copia, la verificación falla y se borra el destino, así que **nunca queda una imagen
+parcial con el nombre que leería el SBL** — pero tampoco hay la garantía de una entrada de
+directorio escrita de un solo golpe: sin CRC, un `/xinu.img` completo de talla y corrupto de
+contenido pasaría.  Esa es exactamente la reserva que queda antes de que el aplicador sea
+seguro.
+
+Derivado del mismo port, un defecto de la FAT que afecta a todo lo que sobrescriba:
+`fl_fopen(path,"w")` **no trunca** (`fatfs/fat_filelib.c:735` marca `FILE_ERASE` y nadie lo
+lee; la rama "Write Existing" de `:791-795` devuelve el fichero con la talla y los clusters
+viejos).  Sobrescribir con menos bytes de los que tenía deja la cola vieja y el `filelength`
+viejo.  Está resuelto con un `fl_remove()` previo en `xsh_udpserver.c` (finalizar) y en
+`httpapi.c` (`PUT`), y descrito con su medida en [02 §4](02-dispositivos.md).
 
 **Pieza 2 — petición de aplicar.**
 Una orden en la shell (`applyupdate`) que escriba un flag en un sitio que el SBL lea. Opciones
@@ -377,8 +411,9 @@ borra el flag y arranca la imagen nueva.
 
 ### 6.3 Dónde poner la imagen: reutiliza el hueco que ya existe
 
-Hoy: SBL@`0x2000` (4.304 B), kernel@`0x5000` (291.372 B, termina `0x4C22C`), ULP@`0x100000`
-(724 B). El hueco entre el fin del kernel y el ULP son **~720 KB libres**.
+Hoy (medido el 2026-11-04): SBL@`0x2000` (4.304 B), kernel@`0x5000`
+(**315.820 B**, termina `0x521AC`), ULP@`0x100000`.  El hueco entre el fin del kernel y el ULP
+son **~696 KB libres** (712.276 B) -- eran "~720 KB" cuando el kernel pesaba 291.372 B.
 
 | plan | layout | comentario |
 |---|---|---|
@@ -388,8 +423,10 @@ Hoy: SBL@`0x2000` (4.304 B), kernel@`0x5000` (291.372 B, termina `0x4C22C`), ULP
 
 Con A, el flujo es: kernel recibe → escribe SD → `applyupdate` → reset → SBL copia
 `0x80000`→`0x5000` (previa validación y copia de seguridad del activo a `0xC0000` si cupiese:
-291 KB + 291 KB sí caben en los 720 KB) → arranca → si el kernel nuevo no llega al banner, el
-SBL puede hacer *rollback* con un contador de intentos en el flag.
+con la imagen actual de 315.820 B son 631.640 B y **caben en los 712.276 B del hueco**, con
+80.636 B de margen; el techo es **~356 KB por imagen**, o sea ~40 KB más de lo que ocupa el
+kernel de hoy) → arranca → si el kernel nuevo no llega al banner, el SBL puede hacer
+*rollback* con un contador de intentos en el flag.
 
 **Sin tabla de particiones no hay nada que proteja los offsets**: la disciplina es del script de
 flasheo. Añadir una mini-tabla firmada en `0x10000` es opcional pero hace que el SBL pueda
@@ -397,7 +434,11 @@ comprobar tamaños en vez de fiarse.
 
 ### 6.4 Coste y orden
 
-1. `udpserver` portado + CRC + renombre atómico (etapa de tamaño medio, todo en el kernel).
+1. ~~`udpserver` portado + CRC + renombre atómico~~ → **hecho a medias el 2026-11-04**: el
+   `udpserver` está portado, en marcha desde el arranque y la subida de 315.820 B quedó
+   verificada byte a byte (§7 de [03](03-red-y-wifi.md)).  Quedan el **CRC32** y el marcador
+   `/xinu.img.ok`; el renombre atómico no puede serlo (no hay `fl_rename` en la FAT del P4) y
+   su papel lo hace hoy la verificación por nombre final + borrado en caso de duda.
 2. Lectura SD de bloque crudo en el SBL + aplicador con validación de cabecera (etapa grande y
    **la única que puede dejar la placa imposible de arrancar**; hay que probarla con `make flash` por
    cable como red de seguridad).
@@ -417,28 +458,38 @@ estado, Cards con elevación por sombra, surface tonal, chips de veredicto, tipo
 Dispositivos · Red y WiFi · ELF/Java/apps · syscheck · conf.c · Roadmap, con el mapa de memoria
 dibujado a escala en CSS (no en ASCII) y el checklist del orden de flasheo de `syscheck`.
 Escrito como **un único fichero, sin red y sin dependencias**: un documento HTML completo, que se
-abre en el navegador del PC, se copia a la SD tal cual y se serviría igual cuando el httpd lea FAT.
+abre en el navegador del PC, se copia a la SD tal cual y **se sirve tal cual desde el
+`httpd`**, que ya lee FAT (§7, Parte 2).
 Se muestra también aquí mismo en la conversación.
 
-Parte 2 (guardarlo en la SD y servirlo) **no está hecha y tiene un motivo concreto**: el
-`httpd` actual solo responde el `httpd_index[]` embebido (`shell/xsh_httpd.c:45`) y **no lee
-ficheros de la SD**. Para que `http://192.168.1.146/` sea el dashboard hacen falta dos cosas del
-§5.2 de [03-red-y-wifi.md](03-red-y-wifi.md):
-
-1. httpd con ficheros desde FAT y `Content-Type` por extensión (`.html`, `.css`, `.js`, `.png`),
-   tarea #57.
-2. Servir con `Connection: close` y caché del HTML en PSRAM, porque cada `open()` de la SD toma
-   el `sdmmcBusLock()` que también necesita el C6.
-
-Instrucciones para poner el fichero en la SD hoy (que sí funciona, para verlo desde el PC):
+Parte 2 (guardarlo en la SD y servirlo) **hecha y validada en placa el 2026-11-04**. El
+`httpd` ya lee la FAT (`shell/xsh_httpd.c`) y trae la API de ficheros del S3
+(`shell/httpapi.c`), así que la subida no necesita montar la tarjeta en el PC:
 
 ```
-$ cp docs/xinu-p4-dashboard.html /media/daniel/<sd>/index.html     # tarjeta montada en el PC
-# y en la placa: xsh$ sd   /   xsh$ ls /index.html   /   xsh$ head /index.html
+$ curl -s -T docs/xinu-p4-dashboard.html "http://192.168.1.146/api/file?path=/index.html"
+{"ok":true,"path":"/index.html","size":76834}          # 1,98 s medidos
+$ curl -s http://192.168.1.146/ | cmp - docs/xinu-p4-dashboard.html && echo IDENTICO
 ```
 
-Si te vale con verlo en el navegador del PC sin esperar al httpd con ficheros, con copiar el
-HTML a cualquier sitio del PC y abrirlo basta: es estático.
+Medido en la misma pasada: 76.834 B bajan en **0,52 / 0,66 / 0,68 s** en tres GETs
+seguidos, con el C6 llevando el tráfico.  El punto 2 del diseño anterior (cachea el HTML
+en PSRAM para no pisar `sdmmcBusLock()`) **no ha hecho falta**: el coste del bloqueo de la
+tarjeta ya está pagado dentro de esos 0,5 s, y el slot 0 (SD) y el slot 1 (C6) comparten
+bus pero no se matan.  Lo que sí se mantiene del diseño es `Connection: close` y la hebra
+`httpdReleaser`, que es lo deja al servidor volviendo a escuchar.
+
+Queda un límite sabido, y no es del httpd: **una conexión cada vez**.  Dos GETs paralelas
+dan 200 y rechazada, porque hay un solo PCB a la escucha (§6.6 de
+[03-red-y-wifi.md](03-red-y-wifi.md)).  Un navegador serializa solo; para varios clientes
+hace falta subir `NTCP` y un PCB por cliente.
+
+Alternativa sin red, para cuando la tarjeta está en blanco: montar la SD en el PC.
+
+```
+$ cp docs/xinu-p4-dashboard.html /media/daniel/<sd>/index.html
+# y en la placa: xsh$ ls /index.html   /   xsh$ head /index.html
+```
 
 ### 7.1 Un dashboard no-necesita-httpd también es posible
 
@@ -454,14 +505,33 @@ red. Es la vía más corta si lo que quieres es que la placa se enseñe a sí mi
 | tarea | qué falta exactamente | tamaño |
 |---|---|---|
 | #38 W5 | una app de red que pruebe conectividad real (HTTP GET saliente o descarga pequeña). `xsh_curl` ya existe sin registrar → **1 línea de `shell.c` y probar** | pequeño |
-| #56 udpserver | port `xsh_udpserver.c` del S3 + CRC + `.part`→ renombre | medio |
-| #57 httpd completo | ficheros desde FAT, `POST`, 404, REST (`httpapi.c` del S3), webterminal con `memtty` | grande |
-| #58 OTA por UDP + bootloader | §6 entero | grande (y el único que puede dejar la placa imposible de arrancar) |
+| #56 udpserver | **hecho y validado en placa el 2026-11-04**: comandos por UDP en el 5000 (`PING`/`INFO`/`MEM`/`PSRAM`/`PS`/`NET`/`SD INFO`/`VERSION`/`UPTIME`/`REBOOT`/`HELP`) + sesión `FW_*` con la imagen verificada byte a byte (§7 de [03](03-red-y-wifi.md)). No se portaron GPIO/TFT/RGB/BUTTON y no hay cliente en la placa | hecho |
+| #57 httpd completo | **hecho y validado en placa el 2026-11-04**: ficheros desde FAT, `PUT`/`DELETE`/`POST`, 404/405, REST (`httpapi.c` del S3). Queda fuera: webterminal con `memtty` (no hay `memtty` en el P4) | hecho |
+| #58 OTA por UDP + bootloader | **staging hecho** (subida a `/xinu.img` por UDP, 315.820 B medidos, §6 Pieza 1). Falta: CRC32 + `/xinu.img.ok` en el kernel, y el aplicador en el SBL (lectura SD en crudo + flag + rollback) -- el aplicador es lo que hoy hace que `FW_END` responda `apply=blocked` | grande (y el único que puede dejar la placa imposible de arrancar) |
 | #61 power save del C6 | **no hay API en el SDK bare-metal**; solo queda una petición RPC propietaria o aceptar la latencia | incierto |
 | #62 telnet tras corte | hebra releaser con `TCP_CTRL_RCVTIMEO` y `tcpFree()` en todos los caminos (§6.6 de [03](03-red-y-wifi.md)) | pequeño |
 | #31/#33 USB | §3: el bloqueo real es que los pads son la consola | medio, con riesgo de consola |
 | #63 esta documentación | ficheros en `docs/port-esp32p4/` + dashboard | hecho |
 | #64 syscheck | [06-syscheck.md](06-syscheck.md) + `examples/syscheck/` | hecho (propuesta, sin cablear) |
+
+### 8.1 Los "planes" declarados el 2026-11-04, ordenados por dependencia
+
+Son metas, no tareas: cada una tiene delante otra que la bloquea, así que la tabla está
+ordenada de la que se puede empezar hoy a la que no.
+
+| plan | qué falta exactamente | bloqueado por | dónde está el análisis |
+|---|---|---|---|
+| librería con **toda la tabla de exports** para `elfrun` | `exports[]` son 14 nombres a mano (`shell/xsh_elf.c`); pasar a un `struct api` con punteros versionado (`api_v1`) | nada — se puede hacer ya | [04 §2.1 Modelo A](04-elf-java-apps.md) |
+| `system/elfload` | no existe; hoy la carga vive dentro del comando `elfrun` del shell. Mover el cargador al kernel para que cualquier hebra lo invoque | nada | [04 §1](04-elf-java-apps.md) (contrato estricto en §1.1) |
+| port de la **JVM** del S3 | inventario y etapas E0..E4 escritos; ningún fichero movido todavía | el `elfload` + la tabla de exports (la JVM se carga como app) | [04 §3](04-elf-java-apps.md) |
+| **java lib** (clases nativas del P4) | `p4.Lcd/Touch`, `p4.Sd`, `p4.Net` son las tres primeras | la JVM | [04 §3.2 E2](04-elf-java-apps.md) |
+| **Java SDK** con todos los natives del P4 | envolturas sobre la java lib + cabecelas de las APIs; se define cuando la java lib tenga al menos una app real encima | java lib | (sin análisis aún; nace de la java lib) |
+| port de **LVGL** | el prerequisito no es LVGL, es el **framebuffer**: hoy el LCD se pinta por `LCD_CTRL_RECT/TEXT/BLIT` sobre SPI y no da 30 FPS | el framebuffer de [02 §3](02-dispositivos.md) | [02 §3](02-dispositivos.md) |
+| solución para **TinyUSB** (dos puertos USB y solo usable uno) | el bloqueo es físico: los pads del USB-OTG son la consola serie; y el FS-PHY no está traído | no tocar la consola | §3 de este documento, tareas #31/#33 |
+| primera app: **`workspace.class`** (launcher al arrancar, con GUI LVGL vía natives de Java) | todo lo de arriba: JVM + java lib + framebuffer/LVGL + elfload. Es la meta, no el primer paso | los siete anteriores | [04 §4](04-elf-java-apps.md) (catálogo) |
+
+Orden que propongo: exports → `elfload` → JVM → java lib → framebuffer/LVGL → SDK →
+`workspace.class`. TinyUSB va aparte porque su riesgo es la consola, no el software.
 
 ## 9. Credenciales y privacidad (la app de "claves guardadas") {#credenciales}
 

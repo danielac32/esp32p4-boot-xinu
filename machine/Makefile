@@ -7,7 +7,7 @@
 #    machine/sbl  → build/sbl.bin   bootloader de 2ª etapa (HP: TCM 0x30100000,
 #                                   flash 0x2000) — lleva cabecera esptool
 #    machine/ulp  → build/ulp.bin   firmware del coprocesador LP (XIP
-#                                   0x40100000, flash 0x100000) — binario crudo
+#                                   0x40400000, flash 0x400000) — binario crudo
 #
 #  El SBL hace el trabajo de arranque del SoC tal como el proyecto de Chalandi
 #  (WDT, clock, PSRAM, MMU) y salta al kernel en __kernel_entry_point

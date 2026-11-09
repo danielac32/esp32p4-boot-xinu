@@ -83,10 +83,6 @@ tid_typ create(void *procaddr, uint ssize, int priority,
     thrptr->fdesc[1] = CONSOLE; /* stdout is console */
     thrptr->fdesc[2] = CONSOLE; /* stderr is console */
 
-    thrptr->elf_task = FALSE;
-    thrptr->elf_img = NULL;
-    thrptr->elf_size = 0;
-
     thrptr->cpu_ticks = 0;
     thrptr->born_ticks = clktotal;
     thrptr->stk_peak = 0;

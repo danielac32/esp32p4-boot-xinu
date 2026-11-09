@@ -1,14 +1,18 @@
 /**
  * @file xsh_httpd.c
  *
- * Servidor HTTP de prueba: una sola pagina.
+ * Servidor HTTP sobre la pila TCP nativa de Xinu y el FAT de la microSD.
  *
- * Es el `httpd' de xinu-s3-amp recortado a lo minimo que hace falta aqui para
- * cerrar la W5 por encima de la pila TCP nativa de Xinu: escuchar en el 80,
- * leer la linea de request y devolver un index HTML que va embebido en el
- * propio .c.  Se queda fuera todo lo del S3 que aun no existe en el P4 (FAT,
- * /api/, webterm, memtty); cuando eso llegue, este fichero se vuelve el caso
- * particular "ruta estatica embebida" del servidor completo.
+ * Es el `httpd' de xinu-s3-amp portado: escucha en el 80, sirve ficheros
+ * estaticos desde la tarjeta (`GET /ruta') y despacha la API REST de ficheros
+ * de `shell/httpapi.c' (/api/files, /api/download, /api/file PUT/DELETE,
+ * /api/mkdir, /api/rmdir).  Se queda fuera lo que en el P4 aun no tiene donde
+ * apoyarse: webterm y sus /api/exec + /api/job.
+ *
+ * La pagina embebida (httpd_index) sigue vivo como respaldo de `/` y
+ * `/index.html` cuando la tarjeta no tiene ese fichero: es la prueba de la W5
+ * tal como se validou, y permite arrancar el servidor antes de subir nada a
+ * la SD.  En cuanto la tarjeta tiene /index.html, ese manda.
  *
  * Dos cosas que no son ornamentales y vienen medidas en placa:
  *  - el read() del request lleva timeout (TCP_CTRL_RCVTIMEO), porque un
@@ -32,10 +36,17 @@
 #include <string.h>
 #include <tcp.h>
 #include <thread.h>
+#include <fat_filelib.h>
+#include <fsutil.h>
+#include <xsh_http.h>
 
 #define HTTPD_PORT      80
-#define HTTPD_RQMAX     512
-#define HTTPD_STK       4096
+/* 2 KB: el request completo de un PUT con cabeceras de curl y una ruta larga
+ * no cabe en los 512 B del servidor de prueba; el body se lee aparte. */
+#define HTTPD_RQMAX     2048
+/* 8 KB: servir de la SD mete la libreria FAT y el driver de tarjeta por
+ * debajo del bucle, y la API llama a fl_fwrite con su propio camino. */
+#define HTTPD_STK       8192
 #define HTTPD_RCVTIMEO  2000
 
 /* Nombre en el devtab (system/conf.c), no el ETH0 del header: el comando lo
@@ -58,30 +69,201 @@ static const char httpd_index[] =
 "<p>El C6 esta asociado a la AP, <code>netup ETH0</code> subio la interfaz por "
 "DHCP y esta pagina salio por la pila TCP nativa de Xinu "
 "(tcpAllocPassive/open(TCP_PASSIVE)/read/write), sin lwIP.</p>\n"
-"<p>Datos del equipo:</p>\n"
-"<ul>\n"
-"<li>Sistema: <code>Embedded Xinu, puerto ESP32-P4</code></li>\n"
-"<li>Interfaz: <code>ETH0 (ESP32-C6 sobre SDIO, esp_hosted)</code></li>\n"
-"<li>Servidores: <code>telnet puerto 23</code>, <code>http puerto 80</code></li>\n"
-"</ul>\n"
-"<p>Pruebas: <code>GET /</code> devuelve esto; cualquier otra ruta da 404.</p>\n"
+"<p>Esto es el respaldo embebido: la microSD todavia no tiene "
+"<code>/index.html</code>.  Subelo con</p>\n"
+"<p><code>curl -T pagina.html \"http://IP_TABLERO/api/file?path=/index.html\"</code></p>\n"
+"<p>Servidores: <code>telnet puerto 23</code>, <code>http puerto 80</code>, "
+"API de ficheros en <code>/api/</code>.</p>\n"
 "</body>\n"
 "</html>\n";
 
 static volatile int httpdRunning = 0;
 
-/** Devuelve la posicion del doble CRLF de cabeceras, o -1 si no esta todavia. */
+/* Un solo servidor a la vez y una conexion cada vez: el buffer del request y
+ * el request parseado viven en .bss en vez de en la pila de la hebra. */
+static char httpdReq[HTTPD_RQMAX + 1];
+static struct http_request httpdRq;
+
+static const char *mime_type(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+
+    if (!dot)
+        return "application/octet-stream";
+    if (!strcmp(dot, ".html") || !strcmp(dot, ".htm"))
+        return "text/html";
+    if (!strcmp(dot, ".txt") || !strcmp(dot, ".log"))
+        return "text/plain";
+    if (!strcmp(dot, ".css"))
+        return "text/css";
+    if (!strcmp(dot, ".js"))
+        return "application/javascript";
+    if (!strcmp(dot, ".json"))
+        return "application/json";
+    if (!strcmp(dot, ".png"))
+        return "image/png";
+    if (!strcmp(dot, ".jpg") || !strcmp(dot, ".jpeg"))
+        return "image/jpeg";
+    if (!strcmp(dot, ".gif"))
+        return "image/gif";
+    if (!strcmp(dot, ".ico"))
+        return "image/x-icon";
+    if (!strcmp(dot, ".svg"))
+        return "image/svg+xml";
+    return "application/octet-stream";
+}
+
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+/* Decodifica %XX del path.  Un '+' literal sigue siendo un plus en la ruta. */
+static bool url_decode_path(char *s)
+{
+    char *r = s;
+    char *w = s;
+
+    while (*r)
+    {
+        if (*r == '%')
+        {
+            int hi;
+            int lo;
+            char c;
+
+            if (!r[1] || !r[2])
+                return FALSE;
+            hi = hexval((unsigned char)r[1]);
+            lo = hexval((unsigned char)r[2]);
+
+            if (hi < 0 || lo < 0)
+                return FALSE;
+            c = (char)((hi << 4) | lo);
+            if (c == '\0')
+                return FALSE;
+            *w++ = c;
+            r += 3;
+        }
+        else
+        {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
+    return TRUE;
+}
+
+/* Parsea "METHOD /path?query HTTP/1.x".  La query se guarda cruda: la API
+ * decodifica cada valor por separado, asi un %26 sigue siendo un valor. */
+static bool parse_request(const char *req, struct http_request *r)
+{
+    const char *p;
+    const char *q;
+    const char *qm;
+    uint len;
+    uint plen;
+    uint qlen;
+
+    p = strchr(req, ' ');
+    if (!p)
+        return FALSE;
+    len = (uint)(p - req);
+    if (len == 0 || len >= sizeof(r->method))
+        return FALSE;
+    memcpy(r->method, req, len);
+    r->method[len] = '\0';
+
+    p++;
+    q = strchr(p, ' ');
+    if (!q)
+        return FALSE;
+    len = (uint)(q - p);
+    if (len == 0)
+        return FALSE;
+
+    qm = memchr(p, '?', len);
+    plen = qm ? (uint)(qm - p) : len;
+    qlen = qm ? (uint)(q - qm - 1) : 0;
+    if (plen >= sizeof(r->path) || qlen >= sizeof(r->query))
+        return FALSE;
+
+    memcpy(r->path, p, plen);
+    r->path[plen] = '\0';
+    r->query[0] = '\0';
+    if (qlen)
+    {
+        memcpy(r->query, qm + 1, qlen);
+        r->query[qlen] = '\0';
+    }
+
+    if (r->path[0] != '/')
+        return FALSE;
+    return url_decode_path(r->path);
+}
+
+/** Devuelve la posicion justo despues de la linea en blanco que cierra las
+ *  cabeceras, o -1 si no esta todavia. */
 static int httpdHeaderEnd(const char *req, int used)
 {
     int i;
 
-    for (i = 0; i + 3 < used; i++)
+    for (i = 0; i + 1 < used; i++)
     {
-        if ('\r' == req[i] && '\n' == req[i + 1] &&
-            '\r' == req[i + 2] && '\n' == req[i + 3])
-        {
+        if (req[i] == '\n' && req[i + 1] == '\n')
+            return i + 2;
+        if (i + 3 < used && req[i] == '\r' && req[i + 1] == '\n'
+            && req[i + 2] == '\r' && req[i + 3] == '\n')
             return i + 4;
+    }
+    return -1;
+}
+
+static int ci_ncmp(const char *a, const char *b, int n)
+{
+    while (n-- > 0)
+    {
+        int ca = (unsigned char)*a++;
+        int cb = (unsigned char)*b++;
+
+        if (ca >= 'A' && ca <= 'Z')
+            ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z')
+            cb += 'a' - 'A';
+        if (ca != cb)
+            return ca - cb;
+        if (!ca)
+            return 0;
+    }
+    return 0;
+}
+
+static long content_length(const char *req, int hdrlen)
+{
+    const char *p = req;
+    const char *end = req + hdrlen;
+
+    while (p < end)
+    {
+        const char *e = p;
+
+        while (e < end && *e != '\n')
+            e++;
+
+        if (ci_ncmp(p, "Content-Length:", 15) == 0)
+        {
+            p += 15;
+            while (p < e && (*p == ' ' || *p == '\t'))
+                p++;
+            return atoi(p);
         }
+        p = e + 1;
     }
     return -1;
 }
@@ -105,6 +287,76 @@ static void httpdSend(int tcpdev, const char *body, int blen,
     {
         (void)write(tcpdev, (void *)body, blen);
     }
+}
+
+static void send_error(int dev, int code, const char *text)
+{
+    char status[48];
+
+    sprintf(status, "%d %s", code, text);
+    httpdSend(dev, text, (int)strlen(text), "text/plain", status);
+}
+
+/**
+ * Sirve un fichero de la SD.  `/` y `/index.html` caen a la pagina embebida
+ * si la tarjeta no los tiene, que es el estado del arranque en frio.
+ */
+static void serve_static(int dev, const char *path)
+{
+    char full[FS_PATH_MAX];
+    char hdr[256];
+    char buf[512];
+    void *f;
+    uint len;
+    int r;
+
+    if (strcmp(path, "/") == 0)
+        path = "/index.html";
+    if (!fs_mounted() || !fs_resolve(path, full, sizeof(full)))
+    {
+        if (!strcmp(path, "/index.html"))
+            httpdSend(dev, httpd_index, (int)sizeof(httpd_index) - 1,
+                      "text/html; charset=utf-8", "200 OK");
+        else
+            send_error(dev, 404, "Not Found");
+        return;
+    }
+
+    f = fl_fopen(full, "r");
+    if (!f)
+    {
+        if (!strcmp(path, "/index.html"))
+        {
+            httpdSend(dev, httpd_index, (int)sizeof(httpd_index) - 1,
+                      "text/html; charset=utf-8", "200 OK");
+            return;
+        }
+        send_error(dev, 404, "Not Found");
+        return;
+    }
+
+    fl_fseek(f, 0, 2);
+    len = (uint)fl_ftell(f);
+    fl_fseek(f, 0, 0);
+
+    sprintf(hdr,
+            "HTTP/1.0 200 OK\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %lu\r\n"
+            "Connection: close\r\n\r\n",
+            mime_type(full), (unsigned long)len);
+    if (SYSERR == write(dev, hdr, strlen(hdr)))
+    {
+        fl_fclose(f);
+        return;
+    }
+
+    while ((r = fl_fread(buf, 1, sizeof(buf), f)) > 0)
+    {
+        if (write(dev, buf, r) != r)
+            break;
+    }
+    fl_fclose(f);
 }
 
 /** Cierra la conexion sin esperarse al FIN del otro lado. */
@@ -133,20 +385,15 @@ static void httpdRelease(int dev)
  * El primer argumento es un numero de device ya resuelto por el comando (con
  * getdev() a partir de nombre), igual que hace `telnetserver': el servidor no
  * tiene por que saber como se llama la interfaz en xinu.conf.
- *
- * El buffer de request es static a proposito: solo hay un httpd (lo garantiza
- * httpdRunning) y 512 B en la pila de una hebra de MINSTK ya no dejan sitio
- * para el write().
  */
 thread httpdServer(int dev, int port)
 {
-    static char req[HTTPD_RQMAX + 1];
     struct netif *iface;
     int tcpdev;
     int n;
     int used;
     int hdrlen;
-    int pathlen;
+    long clen;
 
     iface = netLookup(dev);
     if (NULL == iface)
@@ -174,47 +421,53 @@ thread httpdServer(int dev, int port)
 
         control(tcpdev, TCP_CTRL_RCVTIMEO, HTTPD_RCVTIMEO, 0);
 
+        /* Se leen las cabeceras; el bucle para en la linea en blanco, pero un
+         * cliente rapido ya habra mandado parte del body: eso se pasa a la
+         * API como prebody. */
         used = 0;
-        req[0] = '\0';
+        httpdReq[0] = '\0';
         while (used < HTTPD_RQMAX &&
-               (n = read(tcpdev, req + used, HTTPD_RQMAX - used)) > 0)
+               (n = read(tcpdev, httpdReq + used, HTTPD_RQMAX - used)) > 0)
         {
             used += n;
-            req[used] = '\0';
-            if (httpdHeaderEnd(req, used) >= 0)
+            httpdReq[used] = '\0';
+            if (httpdHeaderEnd(httpdReq, used) > 0)
             {
                 break;
             }
         }
 
-        hdrlen = httpdHeaderEnd(req, used);
+        hdrlen = httpdHeaderEnd(httpdReq, used);
 
-        if (0 == strncmp(req, "GET ", 4))
+        if (hdrlen > 0 && parse_request(httpdReq, &httpdRq))
         {
-            /* La ruta es lo que va entre "GET " y el primer espacio. */
-            pathlen = 0;
-            while (pathlen < HTTPD_RQMAX - 4 && used > 4 + pathlen &&
-                   ' ' != req[4 + pathlen] && '\t' != req[4 + pathlen] &&
-                   '\r' != req[4 + pathlen] && '\n' != req[4 + pathlen])
+            if (strncmp(httpdRq.path, "/api/", 5) == 0)
             {
-                pathlen++;
-            }
+                clen = content_length(httpdReq, hdrlen);
 
-            if ((1 == pathlen && '/' == req[4]) ||
-                (11 == pathlen && 0 == strncmp(req + 4, "/index.html", 11)))
-            {
-                httpdSend(tcpdev, httpd_index,
-                          (int)sizeof(httpd_index) - 1,
-                          "text/html; charset=utf-8", "200 OK");
+                /* curl -T espera esto antes de mandar el body. */
+                if (strstr(httpdReq, "100-continue") != NULL)
+                {
+                    static const char cont[] = "HTTP/1.0 100 Continue\r\n\r\n";
+
+                    write(tcpdev, cont, sizeof(cont) - 1);
+                }
+
+                httpApiHandle(tcpdev, &httpdRq, httpdReq + hdrlen,
+                              used - hdrlen, clen);
             }
-            else if (used > 0 && hdrlen >= 0)
+            else if (strcmp(httpdRq.method, "GET") == 0)
             {
-                httpdSend(tcpdev, "", 0, "text/plain", "404 Not Found");
+                serve_static(tcpdev, httpdRq.path);
+            }
+            else
+            {
+                send_error(tcpdev, 405, "Method Not Allowed");
             }
         }
-        else if (used > 0 && hdrlen >= 0)
+        else if (used > 0)
         {
-            httpdSend(tcpdev, "", 0, "text/plain", "405 Method Not Allowed");
+            send_error(tcpdev, 400, "Bad Request");
         }
 
         httpdRelease(tcpdev);
@@ -227,7 +480,7 @@ thread httpdServer(int dev, int port)
 /**
  * @ingroup shell
  *
- * Shell command (httpd): arranca el servidor de la pagina de prueba.
+ * Shell command (httpd): arranca el servidor HTTP.
  *
  * La interfaz se resuelve con getdev() sobre el nombre del devtab, no con el
  * ETH0 del header: `telnetserver' hace lo mismo con `-d' y asi el comando sigue
@@ -250,7 +503,9 @@ shellcmd xsh_httpd(int nargs, char *args[])
         printf("Uso:\n");
         printf("\thttpd [-d <dispositivo>] [-p <puerto>]\n");
         printf("Descripcion:\n");
-        printf("\tSirve la pagina de prueba (index embebido) por HTTP.\n");
+        printf("\tSirve la microSD por HTTP y expone la API de ficheros\n");
+        printf("\t/api/files, /api/download, /api/file (PUT/DELETE),\n");
+        printf("\t/api/mkdir, /api/rmdir.\n");
         printf("\t-d dispositivo\tinterfaz donde escuchar (por defecto: %s)\n",
                HTTPD_DEVNAME);
         printf("\t-p puerto\tpuerto TCP (por defecto: %d)\n", HTTPD_PORT);

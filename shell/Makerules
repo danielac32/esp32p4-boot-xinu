@@ -15,7 +15,7 @@ C_FILES += xsh_clear.c xsh_date.c xsh_echo.c xsh_exit.c xsh_help.c \
 C_FILES += xsh_kill.c xsh_ps.c xsh_sem.c xsh_mon.c xsh_stack.c xsh_ktest.c
 
 # Memory commands
-C_FILES += xsh_memdump.c xsh_mem.c
+C_FILES += xsh_memdump.c xsh_mem.c xsh_psram.c
 
 # UART commands
 C_FILES += xsh_uartstat.c
@@ -28,7 +28,7 @@ C_FILES += xsh_lcd.c
 C_FILES += xsh_i2c.c xsh_gpio.c xsh_touchpanel.c xsh_power.c xsh_audio.c
 
 # Boot-time dashboard task (main.c spawns it after bootTask)
-C_FILES += xsh_dash.c p4demoTask.c
+C_FILES += xsh_dash.c p4demoTask.c rec.c
 
 # Storage commands
 C_FILES += xsh_sd.c
@@ -49,11 +49,22 @@ C_FILES += xsh_netup.c xsh_netdown.c xsh_ping.c xsh_arp.c xsh_route.c \
 # maquina.  'telnetd' es el alias de siempre.
 C_FILES += xsh_telnet.c xsh_telnetserver.c xsh_telnetd.c
 
-# 'httpd' es el servidor de la pagina de prueba: escucha en el 80 con la pila
-# TCP nativa y devuelve un index que va embebido en el .c (sin FAT, sin /api/
-# y sin webterm, que son las partes del httpd de xinu-s3-amp que aqui todavia
-# no tienen donde apoyarse).
-C_FILES += xsh_httpd.c
+# 'httpd' es el servidor HTTP: escucha en el 80 con la pila TCP nativa y
+# sirve los ficheros de la microSD, con la pagina embebida como respaldo de
+# /index.html.  `httpapi.c' es la API REST de ficheros que el mismo servidor
+# despacha para las rutas /api/ (lista, descarga, PUT/DELETE, mkdir, rmdir);
+# es el puerto de la de xinu-s3-amp sin /api/exec y /api/job, que dependen de
+# webterm y aqui todavia no tienen donde apoyarse.
+C_FILES += xsh_httpd.c httpapi.c
+
+# 'udpserver' es el servidor de comandos por UDP y la puerta de entrada del
+# firmware: un dispositivo UDP en modo pasivo (read() trae el pseudo-header, o
+# sea el origen de la consulta), familia de comandos de texto y la sesion
+# FW_BEGIN/FW_DATA/FW_END/FW_ABORT/FW_STATUS que apila la imagen en
+# /xinu.tmp de la SD y la deja en /xinu.img.  La aplicacion real a flash sigue
+# bloqueada en este puerto (documento 05 §6): no hay driver de escritura ni de
+# borrado de la flash y el SBL no lee la tarjeta.
+C_FILES += xsh_udpserver.c
 
 # Arranque automatico de red (lo invoca main.c como tarea, y tambien es el
 # comando `netboot' para reintentarlo a mano).
@@ -64,14 +75,21 @@ C_FILES += xsh_pwd.c xsh_cd.c xsh_ls.c xsh_cat.c xsh_head.c xsh_tail.c \
            xsh_cp.c xsh_mv.c xsh_rm.c xsh_mkdir.c xsh_rmdir.c xsh_stat.c \
            xsh_df.c xsh_format.c xsh_hexdump.c xsh_touch.c xsh_test.c
 
-# Ejercicio ELF: el binario cargable lo genera 'make' en
-# examples/p4-elfapp (app_elf.h); aqui solo vive el cargador.
-C_FILES += xsh_elfapp.c
+# Apps ELF: 'elf' carga un .elf de la microSD, le aplica la tabla de exports y
+# lo ejecuta (en hebra propia por defecto, o con '--aqui' en la hebra del
+# comando; en ambos casos la PSRAM del app queda libre al terminar).  El
+# cargador en si vive en system/elfload.c (include/elfload.h) y el comando es
+# su cliente.
+C_FILES += xsh_elf.c
 
 # 'syscheck' es la comprobacion del kernel (clk/cpu/mem/net/dev/int/flash/stk).
 # La referencia externa, el guion del PC (p4clk.py) y como leer cada cifra se
 # quedan en examples/syscheck/ y en docs/port-esp32p4/06-syscheck.md.
 C_FILES += xsh_syscheck.c
+
+# 'java' (xsh_java.c) se va con la pila grafica aparcada: esta en
+# parked/java-gui/shell/.  Sin jvm/ ni device/jvm enlazados no tiene nada
+# que llamar.
 
 
 S_FILES =

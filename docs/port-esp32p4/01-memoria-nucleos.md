@@ -67,10 +67,10 @@ RAM. Eso es lo que limita qué se puede reprogramar en caliente (ver §5 y
 0x48000000 │ .audioshare   151.552 B│ anillos PCM TX/RX (NOLOAD)
 0x48025000 │ .sdshare        8.192 B│ página de bloqueo del FAT
 0x48026000 │ _sd_block_page         │
-0x48027000 │ heap PSRAM  33.329.152 │  ← `psram_malloc()` reparte aquí
-0x49F00000 │ RAM del núcleo LP (1 MB)│  ← la que reclama `ulp.ld` (`RAM : ORIGIN = 0x49F00000`)
+0x48027000 │ heap PSRAM  33.363.968 │  ← `psram_malloc()` reparte aquí (33.361.920 libres medidos)
+0x49FF8000 │ RAM del núcleo LP (32K)│  ← `ulp.ld:49` (`ORIGIN = 0x49FF8000, LENGTH = 32K`)
 0x4FFFFFFF └────────────────────────┘
-0x50108000 ┌────────────────────────┐ 32 KB LP_SRAM — declarada en ld.script:29, SIN usar
+0x50108000 ┌────────────────────────┐ 32 KB LP_SRAM — declarada en ld.script:35, SIN usar
 0x50110000   LP_SYS  (0x50110028 = ULP_ENTRY_POINT_REG)
 0x4FF00000 ┌────────────────────────┐ L2MEM 768 KB, RAM de verdad del HP
 0x4FF00000 │ .l2reserve   131.072 B │ ── BANDERA FANTASMA: no hay celdas aquí (caché L2)
@@ -82,7 +82,7 @@ RAM. Eso es lo que limita qué se puede reprogramar en caliente (ver §5 y
 0x4FFC0000 └────────────────────────┘
 ```
 
-Orígenes declarados: [compile/platforms/esp32p4/ld.script:26-29](../../compile/platforms/esp32p4/ld.script#L26-L29).
+Orígenes declarados: [compile/platforms/esp32p4/ld.script:28-35](../../compile/platforms/esp32p4/ld.script#L28-L35).
 Offset de flasheo: [compile/platforms/esp32p4/platformVars:163-171](../../compile/platforms/esp32p4/platformVars#L163-L171).
 
 ### Dónde se solapan las cosas (lo que pregunta el punto 20)
@@ -95,7 +95,7 @@ Offset de flasheo: [compile/platforms/esp32p4/platformVars:163-171](../../compil
 - El ULP se enlaza en `0x40100000` (XIP) porque **el offset de flash es 0x100000**: la
   ventana XIP empieza en `0x40000000`, así que `0x40000000 + 0x100000 = 0x40100000`. En
   el `ulp.ld` original de Chalandi era 0x8000, y con este kernel de ~291 KB quedaría
-  pisado — por eso se movió ([machine/ulp/ulp.ld:17-23](../../machine/ulp/ulp.ld#L17-L23)).
+  pisado — por eso se movió ([machine/ulp/ulp.ld:16-20](../../machine/ulp/ulp.ld#L17-L23)).
 - Los `ORIGIN/LENGTH` de `ld.script` **no son físicos**: `FLASH LENGTH = 31M` y
   `RAM LENGTH = 31M` mientras el chip son 16 MB de flash y 32 MB de PSRAM. El enlace no
   avisará si el kernel pasa de 16 MB. Propuesta en
@@ -108,10 +108,24 @@ De la **PSRAM**: `0x49F00000 = 0x48000000 + 0x1F00000`, el último megabyte de l
 inicializa el SBL (`psram_init()` + MMU) **antes** de soltar el LP core, y lo deja fuera
 del heap del kernel por un detalle del enlazado: `_psram_free_end = ORIGIN(RAM)+LENGTH(RAM)`
 con `LENGTH(RAM)=31M` → el heap de PSRAM termina **justo** en `0x49F00000`.
-Medido: `_psram_free_end = 0x49F00000` (símbolo `B` en `nm`). No es una RAM aparte del
+Medido entonces: `_psram_free_end = 0x49F00000` (símbolo `B` en `nm`; ver la actualización
+más abajo). No es una RAM aparte del
 chip; es PSRAM compartida con una frontera acordada entre dos scripts de enlace. Si
 algún día alguien sube `LENGTH(RAM)` a 32M, el heap del kernel se come la RAM del ULP en
 silencio.
+
+**Actualizado el 2026-11-04 (dos pasos):** el ULP ya no usa el megabyte. Primero
+`ulp.ld:48-49` se recortó a `FLASH LENGTH = 64K` / `RAM LENGTH = 32K`; después el `ORIGIN`
+se movió al final exacto del PSRAM, `0x49FF8000`, y `RAM LENGTH` del kernel subió a
+`32M-32K` ([ld.script:33](../../compile/platforms/esp32p4/ld.script)), así que
+`_psram_free_end = ORIGIN(RAM)+LENGTH(RAM)` vale ahora **`0x49FF8000`** (medido en
+`nm -n xinu.elf`) y las dos reservas teselan los 32 MB sin solape. Ganancia medida en
+placa: heap PSRAM de 32.346.112 B a **33.361.920 B** = **+992 KB** (`syscheck mem`, span
+`0x48027000..0x49ff8000`; el autotest de arranque pasó de `31588 KiB free` a `32580 KiB
+free`). El contrato entre los dos ficheros sigue vigente, solo cambió la cota: si alguien
+pone `LENGTH(RAM)` en `32M`, el heap del kernel se come la pila del LP. La alternativa que
+rompe el contrato —mover el LP a `LP_SRAM`— está en
+[07-flash-map-diseño.md §3.1](07-flash-map-diseño.md).
 
 ---
 
@@ -136,7 +150,7 @@ Reglas prácticas que se desprenden:
    reserva, pero escribir ahí y leer después da basura en cuanto la línea L2 se desaloja.
    Ese fue el root-cause del "phantom 128 KB": ahora `.data`/`.bss`/heap empiezan en
    `0x4FF20000` y el reservado son 128 KB enteros
-   ([ld.script:165-178](../../compile/platforms/esp32p4/ld.script#L165-L178)).
+   ([ld.script:171-184](../../compile/platforms/esp32p4/ld.script#L171-L184)).
 3. La caché L2 **no es write-back transparente para el DMA**: si un buffer lo consume el
    AHB-DMA (audio) o el SDHOST (SDIO), o lo pones en una sección `.NOLOAD` de PSRAM y lo
    escribes por el alias sin caché, o limpias la línea antes de arrancar el DMA. Ver §4.
@@ -256,7 +270,7 @@ Para qué sirve de verdad en este proyecto:
   (cada salto de instrucción es un acceso a SPI).
 
 Comunicación con HP: hoy no hay canal. Lo mínimo es un área fija de LP_SRAM (los 32 KB
-declarados y sin usar en `ld.script:29`) + un bit de `LP_SYS` como interrupción. Hay que
+declarados y sin usar en `ld.script:35`) + un bit de `LP_SYS` como interrupción. Hay que
 añadir `LP_SRAM` al enlazado del kernel (`ld.script` no le pone ninguna sección) para
 que core0 tenga dónde mirar.
 

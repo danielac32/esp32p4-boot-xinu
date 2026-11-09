@@ -35,6 +35,7 @@ const struct centry commandtab[] = {
     {"mon", FALSE, xsh_mon},
     {"mem", FALSE, xsh_mem},
     {"memdump", FALSE, xsh_memdump},
+    {"psram", FALSE, xsh_psram},
     {"uartstat", FALSE, xsh_uartstat},
     {"lcd", FALSE, xsh_lcd},
     {"i2c", FALSE, xsh_i2c},
@@ -57,6 +58,7 @@ const struct centry commandtab[] = {
     {"telnetserver", FALSE, xsh_telnetserver},
     {"telnetd", FALSE, xsh_telnetd},
     {"httpd", FALSE, xsh_httpd},
+    {"udpserver", FALSE, xsh_udpserver},
     {"netboot", FALSE, xsh_netboot},
     {"sd", FALSE, xsh_sd},
     {"pwd", FALSE, xsh_pwd},
@@ -76,7 +78,7 @@ const struct centry commandtab[] = {
     {"hexdump", FALSE, xsh_hexdump},
     {"touch", FALSE, xsh_touch},
     {"test", FALSE, xsh_test},
-    {"elfapp", FALSE, xsh_elfapp},
+    {"elf", FALSE, xsh_elf},
     {"syscheck", FALSE, xsh_syscheck},
 };
 ulong ncommand = sizeof(commandtab) / sizeof(struct centry);

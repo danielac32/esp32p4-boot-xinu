@@ -20,7 +20,7 @@
 	.globl p4_irq_entry
 
 p4_irq_entry:
-	addi	sp, sp, -192
+	addi	sp, sp, -208
 
 	/* Caller-saved integer registers (the interrupted thread owns them). */
 	sw	ra,   0(sp)
@@ -46,7 +46,7 @@ p4_irq_entry:
 	csrr	t0, mstatus
 	sw	t0,  68(sp)
 
-	/* Caller-saved FP state (handlers may use float). */
+	/* FP state (f0-f31 relevantes + fcsr): preserva FPU ante preempcion/ctxsw. */
 	csrr	t0, fcsr
 	sw	t0,  72(sp)
 	fsw	ft0,  76(sp)
@@ -69,6 +69,19 @@ p4_irq_entry:
 	fsw	ft9, 144(sp)
 	fsw	ft10, 148(sp)
 	fsw	ft11, 152(sp)
+	fsw	fs0, 156(sp)
+	fsw	fs0, 156(sp)
+	fsw	fs1, 160(sp)
+	fsw	fs2, 164(sp)
+	fsw	fs3, 168(sp)
+	fsw	fs4, 172(sp)
+	fsw	fs5, 176(sp)
+	fsw	fs6, 180(sp)
+	fsw	fs7, 184(sp)
+	fsw	fs8, 188(sp)
+	fsw	fs9, 192(sp)
+	fsw	fs10, 196(sp)
+	fsw	fs11, 200(sp)
 
 	/* Dispatch: irq number is the low byte of mcause in CLIC mode. */
 	csrr	t0, mcause
@@ -112,6 +125,18 @@ p4_irq_entry:
 	flw	ft9, 144(sp)
 	flw	ft10, 148(sp)
 	flw	ft11, 152(sp)
+	flw	fs0, 156(sp)
+	flw	fs1, 160(sp)
+	flw	fs2, 164(sp)
+	flw	fs3, 168(sp)
+	flw	fs4, 172(sp)
+	flw	fs5, 176(sp)
+	flw	fs6, 180(sp)
+	flw	fs7, 184(sp)
+	flw	fs8, 188(sp)
+	flw	fs9, 192(sp)
+	flw	fs10, 196(sp)
+	flw	fs11, 200(sp)
 
 	lw	ra,   0(sp)
 	lw	t1,   8(sp)
@@ -130,5 +155,5 @@ p4_irq_entry:
 	lw	a7,  60(sp)
 	lw	t0,   4(sp)
 
-	addi	sp, sp, 192
+	addi	sp, sp, 208
 	mret

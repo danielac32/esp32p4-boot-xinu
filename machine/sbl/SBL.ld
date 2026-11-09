@@ -27,10 +27,16 @@ SECTIONS
 /* Kernel entry point (linked in flash, executed via XIP) */
 __kernel_entry_point = 0x40005000;
 
-/* ULP entry point: código en flash (XIP) en el offset 0x100000, muy por
- * encima del kernel (~348 KB desde 0x5000). El SBL sólo carga este símbolo
- * en ULP_ENTRY_POINT_REG; no hay más acoplamiento. */
-__ulp_entry_point = 0x40100000;
+/* ULP entry point: código en flash (XIP) en el offset 0x400000.  Estaba en
+ * 0x100000 (1 MB) y se subio a 4 MB el 2026-11-04, antes de meter LVGL: el
+ * kernel todavia va en 353 KB pero le queda mucho codigo por delante, y con
+ * la ranura en 1 MB el `make flashxinu' (que solo escribe en 0x5000) habria
+ * pisado el firmware del LP core al crecer por encima de ese MB.  La cota de
+ * arranque del LP la fijan ESTE simbolo y el ORIGIN de FLASH de
+ * machine/ulp/ulp.ld; el hueco libre desde aqui hasta el final del kernel lo
+ * comprueba `syscheck flash' en placa (shell/xsh_syscheck.c).  El SBL sólo
+ * carga este símbolo en ULP_ENTRY_POINT_REG; no hay más acoplamiento. */
+__ulp_entry_point = 0x40400000;
 
 /* Peripheral base addresses */
 SPIMEM2       = 0x5008E000;

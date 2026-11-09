@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I — Port a ESP32-P4 (machine, RISC-V, platform, loader) | Manual Xinu-P4.2</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}body{margin:0 auto;max-width:1140px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}.mast a:hover{background:var(--accent2);color:#fff}.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule)}h3{font-size:17px;margin:15px 0 4px;color:var(--accent2)}
+p,li{margin:5px 0}ul,ol{margin:5px 0 5px 20px;padding:0}code{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.6px/1.45 var(--mono);white-space:pre-wrap}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}.warn{border-left-color:#b06500}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0;background:var(--hi)}th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.file{font:700 12.5px var(--mono);color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo I — Port a ESP32-P4 (machine, RISC-V, platform, loader)</h1></div>
+<main>
+<div class="note"><b>Qué es este port.</b> Embedded Xinu ejecutando <em>bare-metal</em> en el ESP32-P4 (Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5), RV32. Sin FreeRTOS/ESP-IDF en runtime: drivers a registro (offsets sobre la base del periférico). XIP: <code>.text/.rodata</code> en flash mapeada; <code>.data</code> se copia a L2MEM y <code>.bss</code> se borra al arrancar.</div>
+
+<h2>1. Capas del árbol y responsabilidades</h2>
+<table>
+<tr><th>Ruta</th><th>Qué contiene / hace</th><th>Quién lo usa o invoca</th></tr>
+<tr><td><span class="file">machine/sbl/</span></td><td>Bootloader de 2ª etapa: WDT, relojes, PSRAM, MMU, libera cores, salta al kernel en <code>__kernel_entry_point</code> (XIP, 0x40005000). Construido por <code>machine/Makefile</code>.</td><td>ROM/arranque del SoC → SBL → kernel.</td></tr>
+<tr><td><span class="file">machine/ulp/</span></td><td>Firmware del core LP (RV32IMC, sin FPU), XIP en 0x40100000, RAM acordada al final de PSRAM (frontera en <code>ld.script</code>).</td><td>Se flashea como imagen separada; corre independiente.</td></tr>
+<tr><td><span class="file">loader/platforms/esp32p4/start.S</span></td><td><code>_start</code>→<code>reset_handler</code>: fija <code>gp</code>; lee <code>mhartid</code> (hart 0 continúa, otros → <code>park</code> con pila <code>_core1stk_end</code>, <code>mtvec</code> propio, testigo <code>{0xC0DE1234,mhartid,sp}</code>, <code>wfi</code>); habilita FPU (<code>mstatus.FS</code>, <code>fcsr=0</code>); copia <code>.data</code>, borra <code>.bss</code>; instala <code>mtvt</code> (tabla HW CLIC) y <code>mtvec=ExceptionVectorTable|3</code>; prepara <code>panicstk</code> y pila del hilo nulo; salta a <code>nulluser</code>. Define <code>ExceptionVectorTable</code> (excepciones síncronas → guarda <code>trap_frame_t</code> → <code>trap_handler</code>).</td><td>Primer código C del kernel (<code>nulluser</code>); HW invoca trampas/IRQs.</td></tr>
+<tr><td><span class="file">system/arch/riscv/</span></td><td><code>ctxsw.S</code> (guarda/restaura ra,mstatus,s0-s11,a0-a7 y FPU f0-f31+fcsr = 56 palabras), <code>setupStack.c</code> (contexto inicial, <code>MIE|MPP|MPIE|FS</code>, args a0-a7/spill), <code>trap.c</code> (despacho por <code>mcause</code>, <code>ecall</code>→<code>syscall_dispatch</code>, volcado y <code>halt</code> en fallo).</td><td><code>resched/create</code>, HW de excepciones.</td></tr>
+<tr><td><span class="file">system/platforms/esp32p4/</span></td><td><code>platforminit.c</code>: <code>platform.family/name</code>, heap L2MEM <code>[P4_L2MEM_BASE, _l2mem_free_end]</code>, <code>clkfreq=P4_TIMER_FREQ</code>, <code>clic_init()</code>, registra <code>ecall</code>, configura <code>P4_MTIMECTL</code>.</td><td><code>nulluser()</code> al arrancar.</td></tr>
+<tr><td><span class="file">compile/platforms/esp32p4/</span></td><td><code>platformVars</code> (ISA <code>rv32imafc_zicsr_zifencei -mabi=ilp32f</code>, CFLAGS, <code>APPCOMPS/DEVICES</code>, sin <code>-lgcc</code>→ROM <code>PROVIDE</code>), <code>ld.script</code> (memoria/secciones/símbolos), <code>xinu.conf</code>.</td><td>Build (<code>compile/Makefile</code>).</td></tr>
+</table>
+
+<h2>2. RISC-V en este port: modo, CSRs, IRQs y FPU</h2>
+<ul>
+<li><b>Machine mode</b> en core0. <code>mtvec</code> en modo vectored/CLIC (tabla de excepciones | 3) para síncronas; <b>IRQs vectorizan por HW</b> vía <code>mtvt</code> + CLIC (<code>clic_init</code> en <code>platforminit</code>). <code>enable()</code> levanta <code>mstatus.MIE</code>.</li>
+<li><b>Trampas:</b> el stub guarda registros en <code>trap_frame_t</code> y llama <code>trap_handler</code>. <code>ecall</code> (mcause 11): avanza <code>mepc+=4</code> y <code>frame-&gt;a0 = syscall_dispatch(frame)</code>. Excepción no manejada: vuelca estado, intenta identificar ELF (<code>elf_quien</code>) y detiene (<code>halt</code>).</li>
+<li><b>FPU:</b> habilitada al arrancar (<code>FS</code>, <code>fcsr</code> limpio) y <b>preservada en cada cambio de contexto</b> (<code>f0-f31+fcsr</code>) — necesario para código float (p. ej. minimp3). El kernel trabaja sin coma flotante por regla del proyecto; la FPU es para casos concretos. Core1 aparcado no la usa hoy.</li>
+<li><b>Exclusión:</b> <code>disable/restore</code> actúan sobre <code>mstatus.MIE</code> del hart local. <b>No son SMP-safe</b> entre núcleos.</li>
+</ul>
+
+<h2>3. Core0, core1 y memoria compartida</h2>
+<p>El SBL suelta ambos harts al mismo entry. Core0 corre Xinu; core1 salta a <code>park</code> (pila propia <code>.core1stk</code> fuera de <code>.bss</code>, testigo legible con <code>memdump</code>) y queda en <code>wfi</code>. CSRs de trap/estado son por hart; la matriz de interrupciones tiene ventanas por core; <code>mtime/mtimecmp</code> es compartido; periféricos y memoria (L2MEM/PSRAM) compartidos con matices de caché. <b>El runtime no es SMP</b>: no hay planificador Xinu en core1. Modelo futuro: coprocesador de tarea fija con buzón (API dibujada, no implementada; ver <code>README_CORE1.md</code>). Si core1 hiciera DMA + FPU, requiere habilitar FPU, aislamiento de cache y sincronización explícita (fences/ventanas directas/un dueño por periférico).</p>
+
+<h2>4. <code>platforminit</code>, <code>nulluser</code> y servicios</h2>
+<p><code>nulluser</code> llama <code>platforminit</code> → <code>sysinit</code> → <code>enable</code> → <code>ready(create(main,...), RESCHED_YES)</code> y entra en bucle <code>sleep(SEC_1)</code>. <code>sysinit</code> arma <code>memlist</code> (heap L2MEM), <code>thrtab</code>/hilo nulo, semáforos/monitores, <code>sdmmcBusInit</code>, buffer pools, <code>readylist</code>, reloj, mailboxes, <b>inicializa todos los dispositivos</b> (<code>devtab[].init</code>) y, si hay red, <code>netInit</code>. El heap del kernel vive en L2MEM (<code>_l2mem_free_start/_end</code> hasta <code>_l2mem_free_end</code>, dejando libres 64 KB altos para ROM). <b>Nota reloj:</b> <code>P4_TIMER_FREQ</code> declarado 360 MHz vs ~320 MHz real → tiempos ~9/8 largos (medido, no corregido).</p>
+
+<div class="note warn">Alias PSRAM: <code>0x48…</code> cacheada y <code>0x88…</code> directa son la <b>misma celda</b> (<code>+0x40000000</code>). Disciplina: un buffer, una ventana; DMA con páginas <code>NOLOAD</code> + 0x88 CPU / 0x48 motor + <code>fence</code> (ref. <code>.audioshare</code>). Ver Cap. IV y VIII.</div>
+
+</main>
+</body>
+</html>

@@ -442,13 +442,13 @@ footer{padding:22px;color:var(--muted);font-size:12px;max-width:1180px;margin:0 
     <h2>Pila de red</h2>
     <p class="sub">Pila nativa Xinu portada (no lwIP), sobre <code>espeth</code>, que es una <b>interfaz</b>: las
       tramas las mueve esp_hosted por SDIO con el C6.</p>
-    <pre><span class="c">apps de shell / servidores</span>   telnet · httpd · ping · dns · netstat …
+    <pre><span class="c">apps de shell / servidores</span>   telnet · httpd · udpserver · ping · dns · netstat …
         <span class="c">▼</span>
    <span class="c">tcp</span> (10 PCB)  <span class="c">udp</span> (2)  <span class="c">raw</span> (2)        <span class="c">icmp</span>
         <span class="c">▼</span>
    <span class="c">ip</span>  ◀── <span class="c">arp</span> (32)  <span class="c">route</span> (32)  <span class="c">dhcpc</span>
         <span class="c">▼</span>
-   <span class="c">netif</span> (NET_NTHR=1 hebra netRecv)  <span class="c">pool bfp</span> (24 × 1616 B)
+   <span class="c">netif</span> (NET_NTHR=1 hebra netRecv)  <span class="c">pool bfp</span> (24 × 1632 B)
         <span class="c">▼</span>
    <span class="c">espeth</span> ETH0  ◀── anillo de 8 tramas de 1600 B
         <span class="c">▼</span>
@@ -474,9 +474,11 @@ footer{padding:22px;color:var(--muted);font-size:12px;max-width:1180px;margin:0 
       <tr><th>comando</th><th>estado</th><th>nota</th></tr>
       <tr><td><code>netboot</code></td><td><span class="st ok">registrado</span></td><td>levanta WiFi + DHCP + servidores en un paso → IP de DHCP: <code>172.16.0.117</code> en la AP del trabajo (<code>PhMNet_2</code>), <code>192.168.1.146</code> en la de casa. Credenciales en <code>shell/xsh_netboot.c:55</code></td></tr>
       <tr><td><code>ping</code> · <code>dns</code> · <code>netstat</code> · <code>ifconfig</code> · <code>arp</code> · <code>msys</code></td><td><span class="st ok">registrado</span></td><td>portados de xinu-s3-amp</td></tr>
-      <tr><td><code>tcp</code> · <code>udpecho</code> · <code>httpd</code> · <code>telnet</code>/<code>telnetd</code></td><td><span class="st ok">registrado</span></td><td><code>httpd</code> es mínimo: un <code>index</code> embebido, <b>no lee FAT</b></td></tr>
+      <tr><td><code>tcp</code> · <code>udpecho</code> · <code>httpd</code> · <code>telnet</code>/<code>telnetd</code></td><td><span class="st ok">registrado</span></td><td><code>httpd</code> es el <b>servidor completo</b>: estáticos desde la FAT de la SD + API REST de ficheros (<code>GET</code>/<code>PUT</code>/<code>DELETE</code>/<code>POST</code>), validado en placa el 2026-11-04</td></tr>
+      <tr><td><code>udpserver</code> [puerto]</td><td><span class="st ok">registrado y lanzado por <code>netboot</code></span></td><td>UDP 5000: 11 comandos de estado (<code>PING</code>/<code>INFO</code>/<code>MEM</code>/<code>PSRAM</code>/<code>PS</code>/<code>NET</code>/<code>SD INFO</code>/…) + la sesión <code>FW_*</code> que apila la imagen en <code>/xinu.img</code>. El lanzamiento es <b>no-fatal</b> (<code>NUDP=2</code> y DHCP/UDP se reparten las ranuras)</td></tr>
+      <tr><td><code>psram</code> [free]</td><td><span class="st ok">registrado</span></td><td><code>shell/xsh_psram.c</code>: rango <code>0x48027000…0x49FF8000</code>, libre/usado y tabla de bloques del heap PSRAM</td></tr>
       <tr><td><code>curl</code> · <code>wget</code> · <code>ip</code></td><td><span class="st av">existe el .c, sin fila en commandtab</span></td><td>registrarlos es 1 línea cada uno (doc 05 §1.6)</td></tr>
-      <tr><td><code>nc</code> · <code>udpserver</code> · <code>httpapi</code></td><td><span class="st no">no portados</span></td><td>#56 (udpserver) y #57 (httpd completo)</td></tr>
+      <tr><td><code>nc</code></td><td><span class="st no">no portado</span></td><td>es lo único que queda del paquete de red del S3; <code>udpserver</code> (#56) y <code>httpapi</code> (#57) se portaron y validaron el 2026-11-04</td></tr>
     </table>
     <h3>Levantar la red a mano</h3>
     <pre>wifi up              <span class="c">// esp_hosted attach por SDIO (slot 1)</span>
@@ -510,8 +512,44 @@ control(dev, TCP_CTRL_RCVTIMEO, ms, 0);   <span class="c">// sin esto: bloqueo e
       <tr><td>4</td><td>Leer con <code>readline()</code>, no con <code>read()</code> a pelo</td><td>HTTP/1.1 termina las cabeceras en <code>\r\n\r\n</code>; un <code>read()</code> devuelve media petición</td></tr>
       <tr><td>5</td><td>Presupuestar el coste de <code>sdmmcBusLock()</code> si sirve ficheros de la SD</td><td>slot 0 y slot 1 comparten controlador: cada lectura de FAT serializa al C6 y sube la latencia del WiFi</td></tr>
     </table>
-    <div class="note warn">Hoy <b>no se puede</b> servir un dashboard desde la SD por <code>httpd</code>: el httpd del
-      port no lee FAT, sirve un <code>index</code> embebido en <code>.rodata</code>. Ver la pestaña Roadmap, punto 19.</div>
+    <div class="note warn"><b>Actualizado el 2026-11-04</b>: servir de la SD <b>sí se puede</b> — el <code>httpd</code>
+      ya lee FAT y tiene API REST. Lo que sigue en pie es el coste de <code>sdmmcBusLock()</code> (condición 5) y que
+      <code>httpdRunning</code> sigue siendo una sola bandera: un <b>segundo</b> servidor en otro puerto todavía
+      necesita su propio flag, su hebra releaser y poner los búferes <code>static</code> por instancia.</div>
+  </div>
+
+  <div class="card">
+    <h2>Servidores medidos en placa (2026-11-04)</h2>
+    <p class="sub">Kernel de 315.820 B flasheado el 2026-11-04, placa en <code>192.168.1.146</code>.
+      Su comando <code>VERSION</code> responde <code>#1564</code> y su banner de arranque dice
+      <code>#1555</code>: el contador de Xinu se hornea por objeto, no por imagen. Todo lo de
+      abajo es salida copiada de la placa, no deducida.</p>
+    <h3><code>httpd</code> + API REST de ficheros</h3>
+    <pre>PUT  /api/file?path=/index.html   -&gt; 201 {"ok":true,"size":76834}   en 1,98 s
+GET  /                            -&gt; 200, 76.834 B, IDENTICO byte a byte (cmp)
+GET  /                            -&gt; 0,52 / 0,66 / 0,68 s en tres pasadas
+GET  /api/files?path=/../../      -&gt; se queda en "/"  (no sale de la tarjeta)
+GET  /no-existe.html              -&gt; 404 ;  POST /api/files -&gt; 405</pre>
+    <h3><code>udpserver</code>: subida de firmware por UDP</h3>
+    <pre>FW_BEGIN 315820  -&gt; OK FW_BEGIN size=315820 block=960 temp=/xinu.tmp
+329 datagramas   -&gt; 4,45 s de total · ack mas lento 0,04 s
+FW_END           -&gt; OK FW_END size=315820 staged=/xinu.img apply=blocked
+verificado por la otra via (GET /api/file?path=/xinu.img del httpd):
+  cmp identico · md5 6383d3d4e02162c9ddd637ed17770c51 en los dos lados</pre>
+    <p>El <code>apply=blocked</code> es honesto: la imagen queda <b>apilada</b> en la SD y no hay aún quien la
+      escriba en la flash (el kernel corre XIP sobre la flash que hay que reescribir, y el SBL no lee la SD → Roadmap,
+      punto 18).</p>
+    <div class="note warn"><b>La librería FAT del P4 no trunca</b> (<code>fatfs/fat_filelib.c:735</code> marca
+      <code>FILE_ERASE</code> y nadie lo lee; la rama "Write Existing" de <code>:791-795</code> devuelve el fichero con
+      su talla vieja). Sobrescribir con menos bytes de los que había deja <b>la cola vieja y el <code>filelength</code>
+      viejo</b>. Está resuelto con un <code>fl_remove()</code> previo en el <code>PUT</code> de <code>httpapi.c</code>
+      y al finalizar la subida en <code>xsh_udpserver.c</code> — y cualquier camino nuevo que sobrescriba necesita la
+      misma disciplina. Y no existe <code>fl_rename()</code>: publicar un fichero de forma atómica no es posible, el
+      sustituto es copiar → verificar talla por el nombre final → borrar temporal, con el <code>fatLibLock()</code>
+      tomado una vez.</div>
+    <p class="sub">Pilas medidas con <code>ps</code>: <code>udpserver</code> 276/12288 B en reposo y 1188/12288 B
+      mientras sirve un <code>PS</code>; <code>httpd</code> 1476/8192 B. Los búferes grandes son <code>static</code> a
+      nivel de fichero en los dos servidores, que es lo que mantiene el pico plano.</p>
   </div>
 
   <div class="card">
@@ -618,7 +656,7 @@ control(dev, TCP_CTRL_RCVTIMEO, ms, 0);   <span class="c">// sin esto: bloqueo e
     <h2>Catálogo de apps (punto 11) — viabilidad honesta</h2>
     <table>
       <tr><th>app</th><th>viabilidad</th><th>qué falta</th></tr>
-      <tr><td>herramientas de red (servidor, telnet, udp, clientes, ping, escáner)</td><td><span class="st ok">inmediata</span></td><td>registrar <code>curl</code>, <code>wget</code> y <code>ip</code>; #56 <code>udpserver</code></td></tr>
+      <tr><td>herramientas de red (servidor, telnet, udp, clientes, ping, escáner)</td><td><span class="st ok">inmediata</span></td><td>los servidores ya están (<code>telnetserver</code>, <code>httpd</code> con FAT+REST, <code>udpserver</code> con la subida de firmware) — solo falta registrar <code>curl</code>, <code>wget</code> e <code>ip</code>, que existen sin fila en la <code>commandtab</code></td></tr>
       <tr><td>notas · gestor de archivos · configuración</td><td><span class="st ok">directa</span></td><td>FAT ya funciona; hace falta el framebuffer para pintar bien</td></tr>
       <tr><td>convertidores de valores</td><td><span class="st ok">directa</span></td><td>—</td></tr>
       <tr><td>música (reproductor)</td><td><span class="st av">requiere MP3</span></td><td>portar Helix/MAD en punto fijo (ver Roadmap)</td></tr>
@@ -823,8 +861,8 @@ control(dev, TCP_CTRL_RCVTIMEO, ms, 0);   <span class="c">// sin esto: bloqueo e
       <tr><td>14</td><td>TinyUSB</td><td><span class="st fa">bloqueo real</span></td><td>los pads USB <b>son</b> el USB-Serial-JTAG por el que entra la consola: usar OTG pierde el ttyACM0. Decide la vía primero (#31/#33)</td></tr>
       <tr><td>15</td><td>Cámara OV5647, foto y vídeo a SD</td><td><span class="st fa">difícil</span></td><td>4 etapas (DVP/MIPI-CSI → ISR → códec → almacenamiento). Sin cabeceras portadas (<code>mipi_csi_*_ll.h</code> está en el SDK), placa sin conector documentado, y 5,9 MB/s en raw es <b>inviable</b> contra el ancho del SD: obliga a JPEG por el acelerador (<code>jpeg_ll.h</code>)</td></tr>
       <tr><td>17</td><td>Librería MP3</td><td><span class="st ok">la más barata del lote</span></td><td>Helix o MAD en <b>punto fijo</b> (encaja con la regla de no-flotante); minimp3 es coma flotante y solo vale dentro de un <code>.app</code> con FPU. La salida ya está hecha: <code>write(AUDIO0, pcm, n)</code> al 48 kHz/16 bits</td></tr>
-      <tr><td>18</td><td>UDP server + bootloader de actualización</td><td><span class="st av">3 piezas</span></td><td>(a) <code>udpserver</code> que reciba y escriba <code>/xinu.img</code> en la SD (#56); (b) un flag en sector crudo de la SD; (c) <b>el aplicador tiene que ir en el SBL</b>, no en Xinu: el kernel corre XIP desde la propia flash que hay que reescribir. Validar la cabecera <code>0xE9</code> antes de copiar; plano A/B en el hueco de 0x80000. <b>Ojo (medido con <code>syscheck flash</code>)</b>: el kernel enlazado XIP <b>no</b> lleva <code>0xE9</code> en su offset — en 0x5000 hay código (<code>0x6f</code>) y el ULP empieza con <code>0x97</code>; si la imagen en <code>/xinu.img</code> es cruda, no hay magic que validar, y el "no pisa el ULP" hay que comprobarlo con <code>_etext</code> vs <code>0x100000</code></td></tr>
-      <tr><td>19</td><td>Dashboard Material Design en la SD servido por httpd</td><td><span class="st av">hecho, no servible aún</span></td><td>este tablero existe (<code>docs/xinu-p4-dashboard.html</code>). Para servirlo desde la placa hace falta que el httpd lea FAT; la alternativa inmediata es pintarlo en el LCD</td></tr>
+      <tr><td>18</td><td>UDP server + bootloader de actualización</td><td><span class="st av">pieza (a) hecha y medida</span></td><td><b>(a) HECHA 2026-11-04</b>: el <code>udpserver</code> recibe la imagen por UDP y la apila en <code>/xinu.img</code> de la SD — 315.820 B en 4,45 s, <code>cmp</code> idéntico al bajarla por el <code>httpd</code>; <code>FW_END</code> responde <code>apply=blocked</code>. Quedan CRC32 + marcador <code>/xinu.img.ok</code> en el kernel (ojo: <b>no hay <code>fl_rename</code></b> en la FAT del P4, así que la publicación atómica no es posible y hoy solo se verifica la <b>talla</b>, no el contenido). (b) un flag en sector crudo de la SD; (c) <b>el aplicador tiene que ir en el SBL</b>, no en Xinu: el kernel corre XIP desde la propia flash que hay que reescribir. Validar la cabecera <code>0xE9</code> antes de copiar; plano A/B en el hueco de 0x80000 (el hueco real con el kernel de hoy son 712.276 B, caben dos imágenes de 315.820 B con 80 KB de margen). <b>Ojo (medido con <code>syscheck flash</code>)</b>: el kernel enlazado XIP <b>no</b> lleva <code>0xE9</code> en su offset — en 0x5000 hay código (<code>0x6f</code>) y el ULP empieza con <code>0x97</code>; si la imagen en <code>/xinu.img</code> es cruda, no hay magic que validar, y el "no pisa el ULP" hay que comprobarlo con <code>_etext</code> vs <code>0x100000</code></td></tr>
+      <tr><td>19</td><td>Dashboard Material Design en la SD servido por httpd</td><td><span class="st ok">hecho y servido</span></td><td>este tablero (<code>docs/xinu-p4-dashboard.html</code>) está subido a la SD como <code>/index.html</code> y lo sirve el <code>httpd</code> desde la FAT: <code>GET /</code> idéntico byte a byte con el fichero del PC (medido 2026-11-04 con la versión de 76.834 B en 0,52 s; la página ha crecido desde entonces). La alternativa no-necesita-httpd (pintarlo en el LCD) sigue apuntada en el doc 05 §7.1</td></tr>
     </table>
     <div class="note">Sobre el OTA: «Xinu recibe la imagen, reinicia, el bootloader ve la imagen en SD, la copia a
       flash y salta» es exactamente el diseño correcto — y la parte no obvia es que el <b>bootloader es el SBL</b>
@@ -837,9 +875,9 @@ control(dev, TCP_CTRL_RCVTIMEO, ms, 0);   <span class="c">// sin esto: bloqueo e
     <table>
       <tr><th>#</th><th>tarea</th><th>qué la desbloquea</th></tr>
       <tr><td>38</td><td>W5: app de red que demuestre conectividad de punta a punta</td><td>decisiones de alcance; la pila ya funciona</td></tr>
-      <tr><td>56</td><td>port de <code>udpserver</code></td><td>es la pieza (a) del OTA</td></tr>
-      <tr><td>57</td><td><code>httpd</code> completo + REST + webterm + memtty</td><td>es lo que permite servir el dashboard desde SD</td></tr>
-      <tr><td>58</td><td>actualización por UDP + mecanismo de aplicador en P4</td><td>depende de 56 y del SBL</td></tr>
+      <tr><td>56</td><td>port de <code>udpserver</code></td><td><span class="st ok">hecho y validado en placa 2026-11-04</span> — era la pieza (a) del OTA; doc 03 §7</td></tr>
+      <tr><td>57</td><td><code>httpd</code> completo + REST</td><td><span class="st ok">hecho y medido 2026-11-04</span> — sirve el dashboard desde la SD. Queda fuera: webterm/memtty (no existe <code>memtty</code> en el P4)</td></tr>
+      <tr><td>58</td><td>actualización por UDP + mecanismo de aplicador en P4</td><td>staging <b>hecho</b>; falta CRC32 + <code>/xinu.img.ok</code> en el kernel y el <b>aplicador en el SBL</b> (lectura SD en crudo + flag + rollback)</td></tr>
       <tr><td><b>61</b></td><td><b>latencia en reposo del C6</b> (p50 ≈ 81 ms; power save / DUP)</td><td>el SDK bare-metal <b>no expone</b> la API de power save: hay que buscar el RPC o conformarse</td></tr>
       <tr><td><b>62</b></td><td><b>telnet no vuelve a aceptar tras un corte brusco del cliente</b> — <b>no se reproduce</b> (2026-11-04: FIN y RST con salida en vuelo, el 23 vuelve a escuchar en 1 s en 4/4 ciclos)</td><td>el <em>refused</em> que se veía es diseño: sin cola de <em>accept</em>, <code>-n 1</code> = un cliente. Queda la carrera de <code>telnetWrite.c:50/:62</code> (devuelven <code>SYSERR</code> sin liberar <code>osem</code>) y el <code>telnetFlush.c:31/:36</code> que sale con las interrupciones desactivadas; heredadas del S3, sin tocar</td></tr>
       <tr><td>31 / 33</td><td>comando <code>usb msc</code> · bring-up del FS-PHY</td><td>la decisión de la consola (pads compartidos)</td></tr>

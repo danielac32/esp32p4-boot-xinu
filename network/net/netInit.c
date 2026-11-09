@@ -29,7 +29,6 @@ int netpool;
 syscall netInit()
 {
     int i = 0;
-
     /* Clear each network interface */
     for (i = 0; i < NNETIF; i++)
     {

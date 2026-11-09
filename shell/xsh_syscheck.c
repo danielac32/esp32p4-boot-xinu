@@ -464,7 +464,7 @@ static void sc_flash(void)
 {
     const uchar *f = (const uchar *)0x40000000U;
     const uchar *xip = (const uchar *)0x40005000U;
-    uint32_t kfin, ulp_off = 0x100000U, k;
+    uint32_t kfin, ulp_off = 0x400000U, k;
     uint32_t oneauno = 1;
     char     b[112];
 
@@ -485,7 +485,7 @@ static void sc_flash(void)
     /* El SBL si lleva su cabecera ESP en 0x2000 (la mira el BootROM).  El kernel
      * NO: su primer byte en 0x5000 es codigo (0x6f = jal) porque la cabecera la
      * consume el SBL al cargar; esperar 0xE9 ahi era una espera falsa. */
-    printf("SBL 0x2000=0x%02x  kernel 0x5000=0x%02x  ULP 0x100000=0x%02x\n",
+    printf("SBL 0x2000=0x%02x  kernel 0x5000=0x%02x  ULP 0x400000=0x%02x\n",
            f[0x2000], f[0x5000], f[ulp_off]);
     snprintf(b, sizeof b, "0xE9 en el SBL (el kernel empieza por su codigo, "
                "0x%02x = jal)", (unsigned)f[0x5000]);

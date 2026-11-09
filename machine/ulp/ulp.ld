@@ -13,12 +13,26 @@
   
   Description : Linker description file script for ESP32-P4 co-processor (ULP-RISC-V)
   
-                Ported from Chalandi's Coprocessor/ulp.ld. The LP core starts executing
-                at flash offset 0x100000 (XIP), configured by the SBL's ulp_boot().
-                (Chalandi usaba 0x8000, que con un kernel de ~348 KB quedaría pisado:
-                sus 12 KB de ventana sólo servían a su demo diminuta.)
-                RAM (data/bss/stack) lives in the last 1MB of PSRAM (0x49F00000),
-                which is already initialized by the SBL before the LP core is released.
+                Portado del Coprocessor/ulp.ld de Chalandi.  El LP core empieza a
+                ejecutar en el offset 0x400000 de la flash (XIP 0x40400000),
+                dirección que le da ulp_boot() del SBL.  La ranura del ULP son
+                SOLO 64 KB de flash (0x400000..0x410000), y su RAM son los
+                32 KB EXACTOS del final del PSRAM: 0x49FF8000..0x4A000000.
+                El offset era 0x100000 y se subio a 4 MB el 2026-11-04 para
+                dejar al kernel un hueco contiguo de 0x5000..0x400000 (4 MB)
+                antes de meter LVGL; desde aqui hasta el final de la flash de
+                16 MB queda libre para el mapa de particiones (doc
+                docs/port-esp32p4/07).  La pareja de este ORIGIN es
+                __ulp_entry_point en machine/sbl/SBL.ld: si se mueve uno sin
+                el otro, el LP salta a basura.
+                (Chalandi usaba 0x8000, que con un kernel de ~348 KB quedaría
+                pisado: sus 12 KB de ventana sólo servían a su demo diminuta.)
+                El PSRAM ya está inicializado y mapeado por el SBL antes de soltar
+                el LP core.  La frontera con el kernel la fijan dos cifras que
+                tienen que cuadrar: aquí ORIGIN+32K = 0x4A000000, y en el kernel
+                `RAM LENGTH = 32M-32K` (ld.script:27) da _psram_free_end =
+                0x49FF8000.  Si alguien sube esa LENGTH a 32M, el heap del kernel
+                se come la pila del LP en silencio.
 
 ******************************************************************************************/
 
@@ -38,8 +52,8 @@ __STACK_SIZE = 1K;
 
 MEMORY
 {
-  FLASH(rx)     : ORIGIN = 0x40100000, LENGTH = 1M
-  RAM(rwx)      : ORIGIN = 0x49F00000, LENGTH = 1M
+  FLASH(rx)     : ORIGIN = 0x40400000, LENGTH = 64K
+  RAM(rwx)      : ORIGIN = 0x49FF8000, LENGTH = 32K
 }
 
 /******************************************************************************************

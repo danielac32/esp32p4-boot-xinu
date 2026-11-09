@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VIII — ELF en PSRAM (elfload y exports) | Manual Xinu-P4.2</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--stamp:#8b2e2e;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}
+body{margin:0 auto;max-width:1140px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}
+.mast a:hover{background:var(--accent2);color:#fff}.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}
+h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule)}
+h3{font-size:17px;margin:15px 0 4px;color:var(--accent2)}
+p,li{margin:5px 0} ul,ol{margin:5px 0 5px 20px;padding:0}
+code{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.6px/1.45 var(--mono);white-space:pre-wrap}
+pre .c{color:#b7a98e}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}
+.warn{border-left-color:#b06500}.danger{border-left-color:var(--stamp)}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0;background:var(--hi)}
+th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}
+th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.file{font:700 12.5px var(--mono);color:var(--accent)}
+.sig{font:12.5px var(--mono);color:#1a3a44;background:#e8efe8;border:1px solid #b9ccb9;padding:5px 8px;display:block}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo VIII — ELF en PSRAM: <code>elfload</code> y <code>exports</code></h1></div>
+<main>
+
+<div class="note"><b>Resumen.</b> Las apps de usuario son binarios <b>ELF relocatables RV32 (<code>ET_REL</code>, salida de <code>ld -r</code>)</b> almacenados en la microSD (<code>/apps/...</code>). El kernel las carga en <b>PSRAM</b>, resuelve sus símbolos contra una tabla de <b>exports</b> (la ABI del sistema), aplica relocaciones y salta a <code>_start</code>. <b>Código:</b> <code>system/elfload.c</code>, <code>include/elfload.h</code>, <code>system/exports.c</code>, <code>include/exports.h</code>; entrada de app <code>examples/p4-elfsdk/apps/lib/start.S</code>. <b>Invocadores:</b> shell <code>elf</code> (<code>xsh_elf.c</code>) y el launcher (<code>create</code>→<code>app_runner</code>→<code>elf_run</code>).</div>
+
+<h2>1. <code>elf_run()</code> — flujo completo (código y funcionamiento)</h2>
+<span class="sig">int elf_run(const char *path, int argc, char *argv[])  /* system/elfload.c */</span>
+<p>Ejecuta el app <b>en la hebra que llama</b> (no crea otra; quien quiera una hebra aparte la crea antes, como hace el launcher). Pasos:</p>
+<ol>
+<li><b>Lectura desde FAT:</b> abre el fichero (<code>fl_fopen</code>) y lee el ELF a memoria temporal/buffers (la lectura se hace en trozos y cediendo cuando procede, para no retener el bus SDMMC — compartido con WiFi — demasiado tiempo). Exige que el volumen FAT esté montado (lo verifica el invocador o el flujo).</li>
+<li><b>Validación de cabecera:</b> magic ELF, <code>ELFCLASS32</code>, <code>EM_RISCV</code>, y <b><code>ET_REL</code></b>. Si es un ejecutable enlazado final (no relocalizable) o de otra clase/máquina, falla con diagnóstico claro (sin <code>.symtab</code>/relocs no se puede enlazar contra exports).</li>
+<li><b>Colocación en PSRAM:</b> recorre secciones con <code>SHF_ALLOC</code>, calcula tamaño total respetando <code>sh_addralign</code> (mín. 4), reserva con <code>psram_malloc</code>. Copia datos de fichero a sus offsets; secciones <code>SHT_NOBITS</code> (<code>.bss</code>) se ponen a cero. La imagen se ejecutará por la <b>ventana directa</b> <code>0x88......</code> (<code>PSRAM_DIRECT = 0x40000000</code> sobre la base cacheada) — misma celda física que 0x48.</li>
+<li><b>Resolución de símbolos:</b> los símbolos definidos valen <code>base[seccion] + st_value</code>. Los <code>UND</code> (no definidos) se buscan por nombre: primero el caso especial <code>exit</code> → <code>elf_exit()</code> (local en <code>elfload</code>, hace <code>kill(gettid())</code>); el resto vía <code>exports_resolver(nombre)</code> en <code>system/exports.c</code>. Si falta alguno, aborta (no salta con símbolos sin resolver).</li>
+<li><b>Relocaciones:</b> aplica los tipos que genera <code>ld -r</code> con las banderas del SDK: <code>R_RISCV_32</code> (1), <code>R_RISCV_CALL</code>/<code>CALL_PLT</code> (18/19, par <code>auipc+jalr</code>), <code>R_RISCV_HI20</code> (26), <code>R_RISCV_LO12_I</code> (27). Inmediatos/parches de 32 bits. <b>Cualquier tipo no soportado aborta</b> antes de saltar (evita <code>mcause</code> 2/5 por código mal parcheado). Verifica alcance de <code>CALL</code>.</li>
+<li><b>Coherencia de caché (crítico, medido):</b> ejecutar por 0x88 evita la icache, pero <b>no</b> el write-back diferido de L1D/L2: líneas sucias sobre esas direcciones (ventana 0x48) pueden desalojarse después y pisar el código/datos escritos por 0x88 → corrupción diferida. <code>elf_run</code> hace <b>writeback+invalidate de L1D y L2</b> sobre el rango (ventana cacheada, alineado a 64 B) antes de copiar/saltar (vía API <code>CACHE.sync_*</code> del port; no usa wrappers ROM).</li>
+<li><b>Registro y salto:</b> guarda <code>elf_img</code>, <code>elf_size</code>, <code>elf_task</code> en <code>thrtab[thrcurrent]</code> (para que <code>kill</code> libere la PSRAM). Localiza <code>_start</code> y salta por la dirección directa con <code>a0=argc</code>, <code>a1=argv</code>. <code>start.S</code> de la app salva <code>ra/s0</code> y llama <code>main(argc,argv)</code>.</li>
+<li><b>Retorno/salida:</b> si el app llama <code>exit()</code> → resuelto a <code>elf_exit()</code> → <code>kill(gettid())</code>: libera pila y <code>elf_img</code> en PSRAM, replanifica (suicidio). Si retornara sin <code>exit</code>, el flujo libera según el diseño (caso no habitual; <code>xsh_elf</code> lo informa).</li>
+</ol>
+
+<h2>2. Contrato de compilación del app (por qué esas banderas)</h2>
+<table>
+<tr><th>Bandera / requisito</th><th>Motivo (fallo medido si se omite)</th></tr>
+<tr><td><code>-fno-pic</code></td><td>Sin GOT/PLT relocalizados por el runtime; resolución por nombre contra <code>exports</code>.</td></tr>
+<tr><td><code>-mno-relax</code></td><td>Evita que el linker relajador convierta <code>auipc+jalr</code> en formas/comprimidas que el cargador no parchea como espera.</td></tr>
+<tr><td><code>-msmall-data-limit=0</code></td><td>Impide <code>.sdata/.sbss</code> relativos a <code>gp</code> (generan <code>R_RISCV_LO12_S</code>/accesos ancla que el cargador no aplica) → <b>sin estáticas mutables</b>.</td></tr>
+<tr><td><code>-march=rv32imaf_zicsr_zifencei</code> (sin <code>c</code>) / consistente con ABI</td><td>Evita instrucciones comprimidas desalineadas respecto al parcheo por palabras del cargador.</td></tr>
+<tr><td><code>-ffunction-sections</code> + <code>ld -r</code></td><td>Genera <code>.text.*</code>/<code>.rela.text.*</code> por función; <code>ld -r</code> conserva relocs y <code>.symtab</code> para que el cargador enlace.</td></tr>
+<tr><td><code>_start</code> en <code>apps/lib/start.S</code></td><td>Punto de entrada que recibe <code>argc/argv</code> y llama <code>main</code>.</td></tr>
+</table>
+
+<h2>3. <code>exports.c</code> — la ABI y por qué es la “raíz” del enlazado</h2>
+<p><span class="file">system/exports.c</span> define <code>exports[] = { {"nombre",(void*)simbolo}, ..., {NULL,NULL} }</code> y <code>exports_resolver(nombre)</code> (búsqueda lineal por <code>strcmp</code>). Cubre: hilos, mensajes, sueño/tiempo, sincronización, memoria L2MEM y PSRAM, stdio/cadenas, despacho de dispositivos (<code>open/read/write/control</code>), FAT <code>fl_*</code>, LVGL (lock + API de librería), mp3, <code>appmgr</code>, WiFi <code>wifinet</code>, <code>elf_run</code>, etc.</p>
+<div class="note warn">
+<b>Reglas que definen la ABI (reales):</b>
+<ul>
+<li><b>Raíz anti <code>--gc-sections</code>:</b> el kernel enlaza con <code>-ffunction-sections --gc-sections</code>; una función sin referencias se elimina. Referenciarla en <code>exports.c</code> la <u>fuerza</u> a existir. La tabla no describe, <b>define</b> lo disponible. Verificación: <code>nm compile/xinu.elf | grep simbolo</code>.</li>
+<li><b>No macros ni <code>static inline</code>:</b> (p. ej. utilidades de LVGL como <code>lv_scr_act</code>/<code>lv_color_hex</code>/<code>lv_pct</code> en 8.3, helpers inline) se expanden en el <code>.c</code> del app; no son símbolos a resolver. Exporta solo funciones reales.</li>
+<li><b><code>exit</code> es especial:</b> no va en la tabla; <code>elfload</code> lo resuelve a <code>elf_exit()</code> → <code>kill(gettid())</code> (libera PSRAM del app). Matar la hebra equivocada (p. ej. desde un callback de <code>lvglui</code>) es un bug grave.</li>
+<li><b>LVGL:</b> se exportan funciones públicas de la librería (no internas <code>lv_draw_/refr_/gpu_/snapshot_</code>) contrastadas con <code>nm</code> y headers visibles.</li>
+</ul>
+</div>
+
+<h2>4. Memoria y modelo de vida</h2>
+<ul>
+<li><b>Imagen en PSRAM</b> (<code>psram_malloc</code>); <b>pila en L2MEM</b> (la de la hebra que corre). Al <code>kill</code>, el kernel libera <code>elf_img</code>.</li>
+<li><b>Una hebra por ejecución de <code>elf_run</code>.</b> El launcher crea una hebra y dentro llama <code>elf_run</code>; <code>exit</code> mata esa hebra. Modelo de un nivel: no anidar <code>elf_run</code> esperando que el interno libere el del exterior limpiamente.</li>
+<li><b>Alias PSRAM:</b> 0x48 cacheada / 0x88 directa (misma celda, +0x40000000). Disciplina de una ventana por buffer; para DMA, patrón 0x88 CPU / 0x48 motor + <code>fence</code> + páginas <code>NOLOAD</code> del linker.</li>
+</ul>
+
+<h2>5. Quién llama a qué</h2>
+<table>
+<tr><th>Componente</th><th>Llama a</th><th>Para qué</th></tr>
+<tr><td><code>xsh_elf</code> (shell)</td><td><code>elf_run</code>, <code>fs_resolve</code>, <code>fl_is_dir</code></td><td>Lanzar un ELF desde consola en la hebra del comando.</td></tr>
+<tr><td><code>launcher</code> (<code>app_runner</code>)</td><td><code>create</code> + <code>elf_run</code>, <code>appmgr</code></td><td>Lanzar apps de <code>/apps/</code> gestionadas.</td></tr>
+<tr><td><code>elf_run</code></td><td><code>fl_*</code>, <code>psram_malloc</code>, <code>exports_resolver</code>, <code>CACHE.sync</code>, salto a <code>_start</code></td><td>Cargar/enlazar/ejecutar.</td></tr>
+<tr><td><code>kill</code></td><td><code>psram_freemem(elf_img)</code></td><td>Recuperar PSRAM al terminar el app.</td></tr>
+</table>
+
+</main>
+</body>
+</html>

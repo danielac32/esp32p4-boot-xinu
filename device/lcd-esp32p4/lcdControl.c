@@ -113,6 +113,19 @@ devcall lcdControl(device *devptr, int func, long arg1, long arg2)
         lcdptr->rot = (uint8_t)arg1;
         break;
 
+    /* Banco de pruebas del bus: pinta N pantallas y mide.  Se cuelga de
+     * control() como el resto para que el lock del panel lo proteja de la
+     * hebra de LVGL mientras corre. */
+    case LCD_CTRL_SPEED:
+        (void)lcdPanelSpeed((int)arg1);
+        break;
+
+    case LCD_CTRL_CLOCK:
+        lcdSpiSetClock((uint32_t)arg1);
+        kprintf("lcd: reloj de bits = %lu Hz (pedido %ld)\r\n",
+                (unsigned long)lcdSpiClockHz(), (long)arg1);
+        break;
+
     default:
         unlock(lcdptr->lock);
         return SYSERR;

@@ -2,7 +2,7 @@
  * @file xsh_netboot.c
  *
  * Arranque de red completo: enciende el C6, se asocia a la AP, sube ETH0 por
- * DHCP y lanza los servidores (telnet).  Es la misma secuencia que en
+ * DHCP y lanza los servidores (telnet, http y el de comandos por UDP).  Es la misma secuencia que en
  * xinu-s3-amp hace system/main.c llamando a los comandos de la shell, solo que
  * aqui el primer paso no existe: el S3 trae el Ethernet en el propio chip, y
  * en el P4 la WiFi vive detras del esp_hosted (RPC por SDIO) y hay que
@@ -18,14 +18,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wifinet.h>
 #include <device.h>
+#include <esp_hosted_sdio.h>
+#include <fat_filelib.h>
+#include <fsutil.h>
 #include <network.h>
+#include <shell.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <thread.h>
 
 shellcmd xsh_wifi(int nargs, char *args[]);
 shellcmd xsh_netup(int nargs, char *args[]);
 shellcmd xsh_telnetserver(int nargs, char *args[]);
 shellcmd xsh_httpd(int nargs, char *args[]);
+shellcmd xsh_udpserver(int nargs, char *args[]);
 
 /* Margen de arranque del C6, en milisegundos: espera antes de la primera
  * pasada de la tarea y espera entre reintentos. */
@@ -33,14 +42,144 @@ shellcmd xsh_httpd(int nargs, char *args[]);
 #define NETBOOT_RETRY_MS    10000U
 #define NETBOOT_TRIES       5U
 
+/* Redes guardadas por la app de ajustes: una por linea, "ssid;clave". */
+#define NETBOOT_FICHERO     "/wifi.txt"
+
+struct red_guardada
+{
+    char ssid[WIFI_RED_SSID];
+    char clave[WIFI_RED_CLAVE];
+};
+
+/**
+ * Enciende el C6 si aun no esta adjunto.  El attach se probo en placa y el
+ * comando `wifi up' ya lleva sus tres configuraciones y su semaforo, asi que
+ * aqui solo se evita repetirlo cuando ya hay enlace.
+ */
+int wifiAsegurar(void)
+{
+    char *up[] = { (char *)"wifi", (char *)"up", NULL };
+
+    if (esp_hosted_sdio_is_attached())
+    {
+        return OK;
+    }
+    return xsh_wifi(2, up);
+}
+
+/**
+ * Asegura el C6, asocia la STA y sube ETH0 por DHCP.  Es la secuencia que ya
+ * hacia `netboot', extraida para que la app de ajustes no tenga que repetirla
+ * (y para que las dos vayan siempre por el mismo camino).
+ */
+int wifiRedConectar(const char *ssid, const char *clave)
+{
+    char *join[5];
+    char *netup[3];
+    char *netdown[3];
+
+    if (OK != wifiAsegurar())
+    {
+        return SYSERR;
+    }
+
+    join[0] = (char *)"wifi";
+    join[1] = (char *)"join";
+    join[2] = (char *)ssid;
+    join[3] = (char *)clave;
+    join[4] = NULL;
+    if (OK != xsh_wifi(4, join))
+    {
+        return SYSERR;
+    }
+
+    /* Si ETH0 ya estaba arriba (la placa ya tenia red al entrar a la app),
+     * `netup' se niega.  Se baja antes para renovar la direccion; si no estaba
+     * arriba, `netdown' devuelve error y se ignora. */
+    netdown[0] = (char *)"netdown";
+    netdown[1] = (char *)"ETH0";
+    netdown[2] = NULL;
+    (void)xsh_netdown(2, netdown);
+
+    /* netup usa SHELL_OK/SHELL_ERROR, no OK/SYSERR: son los dos convenios que
+     * conviven en la shell y mirar el equivocado daria por buena una interfaz
+     * que no subio. */
+    netup[0] = (char *)"netup";
+    netup[1] = (char *)"ETH0";
+    netup[2] = NULL;
+    if (SHELL_OK != xsh_netup(2, netup))
+    {
+        return SYSERR;
+    }
+
+    return OK;
+}
+
+/**
+ * Lee las redes de /wifi.txt.  Devuelve cuantas lineas validas hay (0 si no
+ * existe el fichero o la tarjeta no esta montada).  Se tolera el CR final
+ * porque el fichero se edita en el PC.
+ */
+static int netboot_leer_redes(struct red_guardada *out, int max)
+{
+    char linea[WIFI_RED_SSID + WIFI_RED_CLAVE + 4];
+    void *f;
+    int n = 0;
+
+    if (!fs_mounted())
+    {
+        return 0;
+    }
+
+    f = fl_fopen(NETBOOT_FICHERO, "r");
+    if (NULL == f)
+    {
+        return 0;
+    }
+
+    while (n < max && NULL != fl_fgets(linea, sizeof(linea), f))
+    {
+        char *sep;
+        size_t len;
+
+        len = strlen(linea);
+        while (len > 0 && ('\n' == linea[len - 1] || '\r' == linea[len - 1]))
+        {
+            linea[--len] = '\0';
+        }
+        if (0 == len || '#' == linea[0])
+        {
+            continue;
+        }
+
+        sep = strchr(linea, ';');
+        if (NULL == sep || sep == linea)
+        {
+            continue;               /* sin separador o sin SSID */
+        }
+        *sep = '\0';
+
+        strncpy(out[n].ssid, linea, sizeof(out[n].ssid) - 1);
+        out[n].ssid[sizeof(out[n].ssid) - 1] = '\0';
+        strncpy(out[n].clave, sep + 1, sizeof(out[n].clave) - 1);
+        out[n].clave[sizeof(out[n].clave) - 1] = '\0';
+        n++;
+    }
+
+    fl_fclose(f);
+    return n;
+}
+
 /**
  * @ingroup shell
  *
  * `netboot [ssid] [pass]': trae la red y arranca los servidores.
  *
- * Las credenciales van aqui como constantes porque el arranque tiene que
- * funcionar sin que nadie las escriba; si se pasa ssid (y pass) por linea de
- * comandos se usan esos en su lugar, lo que deja probar otra AP sin recompilar.
+ * Las credenciales por defecto siguen grabadas aqui porque el arranque tiene
+ * que funcionar sin que nadie las escriba, pero ahora se mira primero
+ * /wifi.txt (lo escribe la app de ajustes): se prueban sus redes en orden y
+ * solo si ninguna asocia se cae a la AP grabada.  Pasar ssid y pass por linea
+ * de comandos ignora el fichero, util para probar otra AP sin recompilar.
  *
  * Cada paso es un comando de la shell, invocado como hace main.c en el puerto
  * del S3: asi el output es exactamente el que se veria tecleando, y un paso que
@@ -52,27 +191,30 @@ shellcmd xsh_httpd(int nargs, char *args[]);
  */
 shellcmd xsh_netboot(int nargs, char *args[])
 {
-    const char *ssid = "PhMNet_2";
-    const char *pass = "TofMagSim47";
+    const char *ssid = "wifi2.4Ghz";
+    const char *pass = "ac32mqn422308";
     /* Un solo sitio de donde sale la interfaz: `netup' la recibe por nombre y
      * aqui se resuelve con getdev() para el resumen, igual que `telnetserver
      * -d'.  "ETH0" es el nombre en el devtab (system/conf.c), no la macro. */
     const char *ifname = "ETH0";
-    char *wifi_up[] = { (char *)"wifi", (char *)"up", NULL };
-    char *wifi_join[4];
-    char *netup[3];
+    struct red_guardada redes[WIFI_REDES_MAX];
     char *telnet[] = { (char *)"telnetserver", (char *)"-n", (char *)"1",
                        NULL };
     char *httpd[] = { (char *)"httpd", NULL };
+    char *udpserver[] = { (char *)"udpserver", NULL };
     struct netif *iface;
     int descrp;
+    int nredes = 0;
+    int i;
+    int ok;
 
     if (nargs > 1 && strcmp(args[1], "--help") == 0)
     {
         printf("Usage: netboot [ssid] [pass]\n\n");
         printf("Description:\n");
         printf("\tEnciende el C6, se asocia a la AP, sube ETH0 por DHCP y\n");
-        printf("\tlanza los servidores.  Sin argumentos usa la AP grabada.\n");
+        printf("\tlanza los servidores.  Sin argumentos prueba las redes de\n");
+        printf("\t%s y, si no hay ninguna, la AP grabada.\n", NETBOOT_FICHERO);
         return OK;
     }
 
@@ -85,40 +227,53 @@ shellcmd xsh_netboot(int nargs, char *args[])
         pass = args[2];
     }
 
-    /* `wifi join <ssid> <pass>': el propio join reintenta tres veces, porque
-     * medido en placa el primer Req_WifiConnect suele morir con reason=39
-     * (STA desconectada por el C6) y el segundo intento asocia. */
-    wifi_join[0] = (char *)"wifi";
-    wifi_join[1] = (char *)"join";
-    wifi_join[2] = (char *)ssid;
-    wifi_join[3] = (char *)pass;
-
-    netup[0] = (char *)"netup";
-    netup[1] = (char *)ifname;
-    netup[2] = NULL;
+    /* Sin argumentos, la lista sale de /wifi.txt (la escribe la app de
+     * ajustes).  Se lee ANTES de encender el C6: la microSD y el SDIO del C6
+     * comparten el bloque SDMMC y asi el arranque no mezcla las dos cosas.
+     * Con `netboot ssid pass' el fichero se ignora, que es lo util para probar
+     * otra AP a mano. */
+    if (nargs == 1)
+    {
+        nredes = netboot_leer_redes(redes, WIFI_REDES_MAX);
+        if (nredes > 0)
+        {
+            printf("netboot: %d red(es) en %s\n", nredes, NETBOOT_FICHERO);
+        }
+    }
 
     printf("netboot: encendiendo el C6...\n");
-    if (SYSERR == xsh_wifi(2, wifi_up))
+    if (OK != wifiAsegurar())
     {
         fprintf(stderr, "netboot: fallo el attach SDIO del C6\n");
         return SYSERR;
     }
 
-    printf("netboot: asociandose a \"%s\"...\n", ssid);
-    if (SYSERR == xsh_wifi(4, wifi_join))
+    /* En orden de prioridad: la ultima que guardo la app va la primera.  Cada
+     * `wifi join' ya reintenta tres veces por dentro (medido en placa: la AP
+     * de casa rechaza a veces con motivo 39 y asocia en el intento siguiente). */
+    ok = 0;
+    for (i = 0; i < nredes && !ok; i++)
     {
-        fprintf(stderr, "netboot: no hubo asociacion con \"%s\"\n", ssid);
-        return SYSERR;
+        printf("netboot: probando \"%s\" (%d/%d)...\n",
+               redes[i].ssid, i + 1, nredes);
+        ok = (OK == wifiRedConectar(redes[i].ssid, redes[i].clave));
+        if (!ok)
+        {
+            printf("netboot: \"%s\" no respondio; siguiente\n", redes[i].ssid);
+        }
     }
 
-    /* Ojo al convenio: xsh_wifi() devuelve OK/SYSERR (1/-1) pero xsh_netup() y
-     * xsh_telnetserver() usan SHELL_OK/SHELL_ERROR (0/1); son los dos estilos
-     * que conviven en la shell de Xinu y mirar el equivocado daria por bueno un
-     * paso que fallo. */
-    printf("netboot: subiendo %s por DHCP...\n", ifname);
-    if (SHELL_OK != xsh_netup(2, netup))
+    /* Ultimo recurso: la AP grabada en el codigo.  Mantiene el arranque que ya
+     * funcionaba si el fichero no existe o se quedo con claves viejas. */
+    if (!ok)
     {
-        fprintf(stderr, "netboot: netup %s fallo\n", ifname);
+        printf("netboot: probando la AP grabada \"%s\"...\n", ssid);
+        ok = (OK == wifiRedConectar(ssid, pass));
+    }
+
+    if (!ok)
+    {
+        fprintf(stderr, "netboot: no hubo asociacion con ninguna red\n");
         return SYSERR;
     }
 
@@ -136,6 +291,16 @@ shellcmd xsh_netboot(int nargs, char *args[])
     {
         fprintf(stderr, "netboot: no se pudo lanzar el servidor http\n");
         return SYSERR;
+    }
+
+    /* El servidor UDP va aparte y un fallo suyo NO corta el arranque: se
+     * lanzan tres hebras y solo dos dispositivos UDP (NUDP=2), y DHCP o `dns'
+     * aun podrian tener uno.  Sin udpserver no hay subida de firmware, pero la
+     * consola y el http siguen valiendo. */
+    if (SHELL_OK != xsh_udpserver(1, udpserver))
+    {
+        fprintf(stderr, "netboot: sin servidor UDP (se puede lanzar a mano "
+                        "con `udpserver')\n");
     }
 
     descrp = getdev(ifname);

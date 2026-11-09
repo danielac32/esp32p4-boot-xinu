@@ -22,6 +22,9 @@ static int ls_one(const char *what, const char *path, bool longfmt, bool all,
     unsigned count = 0;
     unsigned long total = 0;
 
+    /* La libreria FAT ya se serializa con su monitor interno reentrante
+     * (fl_attach_locks en fatinit.c), que se toma/suelta en cada llamada fl_*.
+     * Al imprimir entre iteraciones no se retiene, asi MP3 puede intercalar. */
     if (fl_is_dir(path))
     {
         if (header)

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VII — Shell y comandos (código, funcionamiento, uso, quién llama) | Manual Xinu-P4.2</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--stamp:#8b2e2e;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}
+body{margin:0 auto;max-width:1160px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}
+.mast a:hover{background:var(--accent2);color:#fff}.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}
+h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule)}
+h3{font-size:17px;margin:15px 0 4px;color:var(--accent2)}
+h4{font:700 13.5px var(--mono);margin:11px 0 3px;color:var(--stamp)}
+p,li{margin:5px 0} ul,ol{margin:5px 0 5px 20px;padding:0}
+code{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.6px/1.45 var(--mono);white-space:pre-wrap}
+pre .c{color:#b7a98e}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}
+.warn{border-left-color:#b06500}
+table{width:100%;border-collapse:collapse;font-size:13.8px;margin:8px 0;background:var(--hi)}
+th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}
+th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.file{font:700 12.5px var(--mono);color:var(--accent)}
+.sig{font:12.5px var(--mono);color:#1a3a44;background:#e8efe8;border:1px solid #b9ccb9;padding:5px 8px;display:block;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo VII — Shell: comandos (código, funcionamiento, uso, quién llama)</h1></div>
+<main>
+
+<div class="note"><b>Qué cubre.</b> El motor de la shell y sus comandos (<code>shell/</code>, funciones <code>xsh_*</code>): cómo se despachan, qué hace el código, para qué sirve cada comando y <b>quién lo invoca</b>. La shell corre sobre la consola serie (UART0/TTY, <code>CONSOLE</code>) y, cuando hay red, también como sesión telnet (dispositivo <code>telnet</code> sobre TCP). Las apps gráficas no “llaman” a <code>xsh_*</code>; usan las mismas APIs del kernel/exportadas (<code>elf_run</code>, <code>fl_*</code>, <code>wifinet</code>, <code>appmgr</code>, <code>open/read/write/control</code>).</div>
+
+<h2>1. Motor de la shell: cómo llega una orden a <code>xsh_*</code></h2>
+<h3>1.1 Tabla de comandos (<code>shell/shell.c</code>)</h3>
+<p><code>shell.c</code> define <code>commandtab[]</code> (y la lógica de la REPL): cada entrada asocia un nombre textual con metadatos (p. ej. si es builtin/gestión de hilo) y el puntero a la función manejadora <code>shellcmd xsh_foo(int nargs, char *args[])</code>. Ejemplos reales en la tabla: <code>{"clear",...,xsh_clear}</code>, <code>{"ps",...,xsh_ps}</code>, <code>{"elf",...,xsh_elf}</code>, <code>{"wifi",...,xsh_wifi}</code>, <code>{"ls",...,xsh_ls}</code>, <code>{"kill",...,xsh_kill}</code>, <code>{"httpd",...,xsh_httpd}</code>, etc. (ver <code>shell/shell.c</code> para la lista completa y flags).</p>
+
+<h3>1.2 Ciclo de ejecución</h3>
+<ol>
+<li><b>Quién lanza la shell:</b> durante el arranque/servicios del sistema se crea una hebra que ejecuta el bucle de shell sobre el descriptor de consola (y análogamente <code>telnetd</code> atiende conexiones TCP y crea sesiones que hablan el protocolo telnet y ejecutan comandos sobre su propio flujo). El hilo corre con los descriptores estándar apuntando a <code>CONSOLE</code> (o al canal telnet) — <code>create()</code> hereda fds 0/1/2 a <code>CONSOLE</code> por defecto.</li>
+<li><b>Lectura y parseo:</b> la REPL lee una línea, la tokeniza en <code>nargs/args</code> (estilo argv: <code>args[0]</code> es el comando), busca el nombre en <code>commandtab</code> (búsqueda lineal/tabla según implementación) y, si existe, invoca <code>xsh_* (nargs, args)</code>.</li>
+<li><b>Ejecución:</b> el comando corre <em>en el contexto de la hebra de la shell</em> (salvo comandos que explícitamente crean hilos, p. ej. servidores/demos que se quedan corriendo). Por eso <code>elf</code> ejecuta el app en la hebra del comando (<code>elf_run</code> salta dentro de esa hebra) y al terminar el prompt vuelve. Un <code>kill</code> de la propia shell mata esa sesión.</li>
+<li><b>E/S:</b> los comandos usan <code>printf/fprintf/kprintf</code> y leen stdin según el caso; <code>printf</code> escribe al stdout del hilo (consola/telnet). El acceso a hardware va por <code>open/read/write/control</code> sobre <code>devtab</code>; a ficheros por <code>fl_*</code> (<code>fat_filelib.h</code>) vía <code>fsutil</code> (<code>fs_resolve</code>, <code>fs_mounted</code>).</li>
+</ol>
+<div class="note">Utilidades comunes: <code>fs_resolve(arg, ruta, tam)</code> normaliza rutas (colapsa <code>.</code>/<code>..</code>, las hace absolutas respecto al cwd de la shell) y <code>fs_mounted()</code> comprueba que hay volumen FAT. Muchos comandos de ficheros devuelven error claro si no hay tarjeta montada.</div>
+
+<h2>2. Comandos del sistema y diagnóstico (kernel/hilos/memoria)</h2>
+
+<h3><span class="file">xsh_ps.c</span> — <code>ps</code> (listar hilos)</h3>
+<span class="sig">shellcmd xsh_ps(int nargs, char *args[])</span>
+<p><b>Código/funcionamiento.</b> Valida args (<code>--help</code>). Imprime cabecera <code>TID NAME STATE PRIO PPID CPU% STK peak/total</code>. Recorre <code>thrtab[0..NTHREAD-1]</code>; salta <code>THRFREE</code>. Calcula <code>life = clktotal - thrptr-&gt;born_ticks</code> y <code>pct = cpu_ticks / (life/100)</code> (evita división de 64 bits; acota a 100). Mapea <code>state</code> a nombres (<code>curr/free/ready/recv/sleep/susp/wait/rtim/migr</code>). Muestra <code>stack_peak(tid)</code>/<code>stack_total(tid)</code>.</p>
+<p><b>Para qué.</b> Ver qué hilos existen, su estado, prioridad, consumo de CPU relativo y uso de pila (high-water). <b>Quién lo llama.</b> El usuario desde la shell (serie o telnet). <b>APIs del kernel que usa:</b> lectura directa de <code>thrtab</code>, <code>clktotal</code>, <code>stack_peak/stack_total</code>.</p>
+
+<h3><span class="file">xsh_kill.c</span> — <code>kill &lt;PID&gt;</code></h3>
+<span class="sig">shellcmd xsh_kill(int nargs, char *args[])</span>
+<p><b>Código/funcionamiento.</b> Parsea <code>tid = atoi(args[1])</code>. Rechaza <code>NULLTHREAD</code> (“Operation not permitted”). Si matas tu propia hebra (<code>tid == gettid()</code>), avisa y duerme 2 s (para que se vea el mensaje) antes de morir. Llama <code>kill(tid)</code>; si <code>SYSERR</code> informa “No such thread”.</p>
+<p><b>Para qué.</b> Terminar una tarea por TID. <b>Quién lo llama.</b> Usuario (shell). <b>Kernel:</b> <code>gettid</code>, <code>kill</code> (que a su vez libera pila, la imagen ELF en PSRAM si la hebra era un app, notifica al padre, y replanifica si era el actual).</p>
+
+<h3>Otros de diagnóstico</h3>
+<table>
+<tr><th>Comando</th><th>Fichero</th><th>Funcionamiento / uso</th><th>Quién llama / APIs</th></tr>
+<tr><td><code>mem</code></td><td><code>xsh_mem.c</code></td><td>Muestra estado de memoria (lista libre del heap L2MEM).</td><td>Usuario; recorre/consulta <code>memlist</code>.</td></tr>
+<tr><td><code>memdump</code></td><td><code>xsh_memdump.c</code></td><td>Vuelca regiones de memoria (útil p. ej. testigo <code>_core1stk</code>).</td><td>Usuario; lecturas directas de direcciones.</td></tr>
+<tr><td><code>psram</code></td><td><code>xsh_psram.c</code></td><td>Información del heap PSRAM (rangos/uso/bloques según implementación).</td><td>Usuario; allocator <code>psram_*</code>/estado.</td></tr>
+<tr><td><code>stack</code></td><td><code>xsh_stack.c</code></td><td>Uso/high-water de pilas de hilos.</td><td>Usuario; <code>stack_*</code>/contabilidad.</td></tr>
+<tr><td><code>sem</code></td><td><code>xsh_sem.c</code></td><td>Estado de semáforos (<code>semtab</code>).</td><td>Usuario; inspección de tabla.</td></tr>
+<tr><td><code>mon</code></td><td><code>xsh_mon.c</code></td><td>Estado de monitores (<code>montab</code>).</td><td>Usuario.</td></tr>
+<tr><td><code>uptime</code>/<code>date</code>/<code>sleep</code></td><td><code>xsh_uptime/date/sleep.c</code></td><td>Tiempo transcurrido / fecha / dormir la shell (afectados por sesgo de <code>clkfreq</code>).</td><td>Usuario; <code>clktime</code>, <code>sleep()</code>.</td></tr>
+<tr><td><code>clear</code>/<code>echo</code>/<code>help</code>/<code>exit</code>/<code>reset</code></td><td><code>xsh_*</code></td><td>Terminal, ayuda (<code>help/?</code>), salir de sesión, reinicio.</td><td>Usuario; E/S consola o control de plataforma.</td></tr>
+<tr><td><code>ktest</code></td><td><code>xsh_ktest.c</code></td><td>Batería de pruebas del kernel.</td><td>Usuario; invoca rutinas de test.</td></tr>
+</table>
+
+<h2>3. Sistema de archivos (microSD FAT)</h2>
+<table>
+<tr><th>Comando</th><th>Fichero</th><th>Funcionamiento (resumen de código)</th><th>Uso / quién llama</th></tr>
+<tr><td><code>ls [-l] [-a] [rutas]</code></td><td><code>xsh_ls.c</code></td><td>Parsea opciones (<code>-l</code> largo con tamaño, <code>-a</code> incluye <code>.</code>/<code>..</code>, <code>--</code>). Resuelve rutas con <code>fs_resolve</code>; exige <code>fs_mounted()</code>. Para directorio: <code>fl_opendir/fl_readdir/fl_closedir</code> e imprime (FatFs serializado por su monitor interno). Para fichero: lo nombra. Soporta varias rutas con cabecera.</td><td>Listar SD. Usuario shell. APIs: <code>fl_*</code>, <code>fsutil</code>.</td></tr>
+<tr><td><code>cd</code>/<code>pwd</code></td><td><code>xsh_cd.c</code>/<code>xsh_pwd.c</code></td><td>Cambia/consulta directorio de trabajo de la shell (estado en <code>fsutil</code>/cwd).</td><td>Navegación. Usuario.</td></tr>
+<tr><td><code>cat</code>/<code>head</code>/<code>tail</code>/<code>hexdump</code></td><td><code>xsh_cat/head/tail/hexdump.c</code></td><td>Abren con <code>fl_fopen</code>, leen (<code>fl_fread/fgets</code>), imprimen; cierran. <code>hexdump</code> formatea bytes.</td><td>Inspección de ficheros. Usuario; <code>fl_*</code>.</td></tr>
+<tr><td><code>cp</code>/<code>mv</code>/<code>rm</code></td><td><code>xsh_cp/mv/rm.c</code></td><td>Copian leyendo/escribiendo; <code>rm</code> usa <code>fl_remove</code>; <code>mv</code> copia+borra (no hay <code>fl_rename</code>). Respetar disciplina de sobrescritura.</td><td>Gestión de ficheros. Usuario.</td></tr>
+<tr><td><code>mkdir</code>/<code>rmdir</code></td><td><code>xsh_mkdir/rmdir.c</code></td><td><code>fl_createdirectory</code> / <code>fl_removedirectory</code>.</td><td>Directorios. Usuario.</td></tr>
+<tr><td><code>stat</code>/<code>df</code>/<code>touch</code>/<code>format</code>/<code>sd</code></td><td><code>xsh_*</code></td><td>Metadatos/espacio, crear fichero vacío, formateo, pruebas del dispositivo SD.</td><td>Usuario; <code>fl_*</code>/device SD.</td></tr>
+</table>
+<div class="note warn">Al sobrescribir un fichero existente, la FAT de este port puede no truncar: si el nuevo contenido es más corto queda cola vieja. Comandos/herramientas que sustituyen contenido deben borrar antes o garantizar tamaño (misma disciplina que <code>httpapi</code>/settings).</div>
+
+<h2>4. Ejecución de aplicaciones ELF</h2>
+<h3><span class="file">xsh_elf.c</span> — <code>elf ARCHIVO.elf [args]</code></h3>
+<span class="sig">shellcmd xsh_elf(int nargs, char *args[])</span>
+<p><b>Código/funcionamiento.</b> Requiere ≥2 args. Resuelve ruta (<code>fs_resolve</code>), exige <code>fs_mounted()</code> y que no sea directorio. Llama <b><code>elf_run(ruta, nargs-2, &amp;args[2])</code></b> (<code>system/elfload.c</code>): el cargador coloca el <code>ET_REL</code> en PSRAM, resuelve símbolos contra <code>exports.c</code>, aplica relocaciones, hace coherencia de caché y salta a <code>_start</code> con <code>argc/argv</code>. <b>Corre en la hebra del propio comando.</b> Si el app hace <code>exit()</code> → <code>kill(gettid())</code> → muere la hebra y el kernel libera la PSRAM (<code>elf_img</code>), volviendo al prompt. Si <code>elf_run</code> retorna sin que el app salga por <code>exit</code> (caso raro), el comando avisa “volvió sin exit(); su PSRAM quedó libre”.</p>
+<p><b>Para qué.</b> Lanzar apps ELF manualmente (<code>elf /apps/launcher/app.elf</code>, <code>elf /apps/ejemplo/app.elf</code>). <b>Quién lo llama.</b> Usuario shell. <b>Relación:</b> el launcher hace lo mismo programáticamente (<code>create</code> de una hebra que ejecuta <code>elf_run</code>).</p>
+
+<h2>5. Red y WiFi</h2>
+<h3><span class="file">xsh_wifi.c</span> (y <code>xsh_wifi_scan.c</code>) — <code>wifi ...</code></h3>
+<p><b>Funcionamiento (estructura real).</b> Subcomandos como <code>up/down/diag/ver/dump/probe/jam/poke/init/mac/stats/signal/join/leave/scan/sweep/sdio/...</code> (diagnóstico profundo del transporte y del RPC). <code>wifi up</code> serializa el attach con un semáforo (solo un C6, medido: attach concurrente corrompe <code>s_ctx</code>), prueba una escalera de configs (default/pullups/safe-1bit), adjunta <code>esp_hosted</code> por SDIO slot 1 (compartido con SD → <code>sdmmcBusLock</code>), imprime diagnósticos leídos del periférico y sondea la primera trama (entregando el handshake PRIV/capacidades). Los RPC (<code>ver/init/mac/join/signal/scan</code>) hablan con el firmware del ESP32-C6 vía TLV/protobuf sobre el transporte (ids medidos en placa; ver comentarios/funciones en <code>xsh_wifi_scan.c</code>). <code>scan</code> lista APs; <code>signal</code> lee RSSI/canal (RPC 294).</p>
+<p><b>Para qué.</b> Subir WiFi, diagnosticar SDIO/RPC, asociar y medir señal. <b>Quién lo llama.</b> Usuario shell; el arranque automático lo orquesta <code>netboot</code>. Las apps gráficas usan la API exportada <code>wifinet</code> (no <code>xsh_wifi</code>), que reutiliza el mismo stack/esp_hosted. <b>APIs:</b> <code>esp_hosted*</code>, SDIO/SDMMC, semáforos, <code>sleep</code>.</p>
+
+<h3>Otros de red</h3>
+<table>
+<tr><th>Comando</th><th>Fichero</th><th>Funcionamiento / uso</th><th>Quién llama</th></tr>
+<tr><td><code>netboot</code></td><td><code>xsh_netboot.c</code></td><td>Orquesta WiFi up + asociación (credenciales/fichero) + DHCP + servicios; crea/coordina tareas de arranque de red.</td><td>Usuario o flujo de arranque (<code>main</code>/tarea).</td></tr>
+<tr><td><code>netup</code>/<code>netdown</code></td><td><code>xsh_netup/netdown.c</code></td><td>Subir/bajar interfaz/red.</td><td>Usuario.</td></tr>
+<tr><td><code>ifconfig</code></td><td><code>xsh_ifconfig.c</code></td><td>Muestra/configura netif (IP, máscara, MAC de <code>ETH0</code>).</td><td>Usuario; pila/netif.</td></tr>
+<tr><td><code>ping</code></td><td><code>xsh_ping.c</code></td><td>Envía ICMP Echo Request y espera respuesta (timeouts).</td><td>Usuario; ICMP/IPv4.</td></tr>
+<tr><td><code>dns</code></td><td><code>xsh_dns.c</code></td><td>Resolución de nombres (según soporte).</td><td>Usuario; UDP/DNS.</td></tr>
+<tr><td><code>arp</code>/<code>route</code>/<code>netstat</code></td><td><code>xsh_arp/route/netstat.c</code></td><td>Inspección de caché ARP, tabla de rutas, estado de red.</td><td>Usuario.</td></tr>
+<tr><td><code>tcpstat</code>/<code>udpstat</code></td><td><code>xsh_tcpstat/udpstat.c</code></td><td>Estado de <code>tcptab</code>/<code>udptab</code>.</td><td>Usuario.</td></tr>
+<tr><td><code>httpd</code></td><td><code>xsh_httpd.c</code> + <code>httpapi.c</code></td><td>Servidor HTTP sobre TCP (ficheros estáticos desde SD: <code>/</code>, <code>/index.html</code>, y rutas; fallback embebido si no hay <code>/index.html</code>). API REST <code>/api/file</code> (PUT/GET/DELETE), <code>/api/mkdir|rmdir</code>, listado/descarga, <code>/api/shot</code> (BMP vía <code>lvglShotBmp</code>). Usa patrón de servidor TCP (<code>tcpAlloc*</code>, <code>open</code> passive, <code>tcpOpen</code>, timeouts) y FAT con disciplina de sobrescritura. Atiende peticiones secuencialmente (buffers <code>static</code> por 8 KB de pila).</td><td>Usuario (lo arranca). Clientes HTTP (navegador, <code>curl</code>).</td></tr>
+<tr><td><code>telnet</code>/<code>telnetserver</code>/<code>telnetd</code></td><td><code>xsh_telnet*</code></td><td>Cliente y servidor telnet; sesiones cocinadas sobre TCP (device <code>telnet</code> maneja eco/IAC/CRLF) que ejecutan comandos de la shell.</td><td>Usuario / clientes remotos.</td></tr>
+<tr><td><code>udpserver</code></td><td><code>xsh_udpserver.c</code></td><td>Servicio UDP (comandos, staging de firmware en <code>/xinu.img</code>, protocolo <code>FW_*</code>; <code>apply</code> bloqueado sin bootloader SD). Comparte ranuras UDP con DHCP en escenarios concretos.</td><td>Usuario / herramientas host.</td></tr>
+</table>
+
+<h2>6. Hardware y periféricos</h2>
+<table>
+<tr><th>Comando</th><th>Fichero</th><th>Funcionamiento / uso</th><th>Quién llama / APIs</th></tr>
+<tr><td><code>gpio</code></td><td><code>xsh_gpio.c</code></td><td>Configura/lee/escribe pines vía <code>control(GPIO0, GPIO_CTRL_*, pin, val)</code> o equivalentes (dir, pull, open-drain, write, read, toggle). El driver <code>device/gpio/gpioControl.c</code> despacha a <code>gpio_set_dir/set_pull/set_open_drain/write/read/toggle</code>.</td><td>Usuario; driver GPIO.</td></tr>
+<tr><td><code>i2c</code></td><td><code>xsh_i2c.c</code></td><td>Operaciones sobre I2C0 compartido; <code>i2c scan</code> sondea direcciones (detecta ES8311 0x18, AXP2101 0x34, FT6336 0x38…).</td><td>Usuario; <code>control</code>/driver I2C (con monitor de bus).</td></tr>
+<tr><td><code>lcd</code></td><td><code>xsh_lcd.c</code></td><td>Pruebas y dibujo en <code>LCD0</code> (fill/blit/primitivas vía <code>control</code>).</td><td>Usuario; driver LCD.</td></tr>
+<tr><td><code>touchpanel</code></td><td><code>xsh_touchpanel.c</code></td><td>Lee puntos del touch (<code>TOUCH0</code>) en modo prueba/poleo; reporta coords/estado.</td><td>Usuario; driver touch/I2C.</td></tr>
+<tr><td><code>power</code></td><td><code>xsh_power.c</code></td><td>Lectura <b>solo</b> del PMIC AXP2101 (batería, tensión, estado) vía <code>control(POWER0,...)</code>. No escribe regs de potencia.</td><td>Usuario; driver power/I2C.</td></tr>
+<tr><td><code>audio</code></td><td><code>xsh_audio.c</code></td><td>Controla <code>AUDIO0</code> (ES8311+I2S+DMA): volumen/mute/ganancia, tonos, <code>play</code> WAV/PCM 48 kHz 16-bit (lee fichero y hace <code>write</code> al device), <code>rec</code>/<code>loop</code>.</td><td>Usuario; driver audio + FAT.</td></tr>
+<tr><td><code>uartstat</code></td><td><code>xsh_uartstat.c</code></td><td>Estado/estadísticas de la UART.</td><td>Usuario; driver UART.</td></tr>
+</table>
+
+<div class="note"><b>Patrón común de un <code>xsh_*</code>.</b> Firma <code>shellcmd xsh_cmd(int nargs, char *args[])</code>; si <code>--help</code> imprime uso y retorna; valida nº de args; realiza la acción llamando APIs del kernel (<code>kill/sleep/gettid</code>), tablas (<code>thrtab</code>), FAT (<code>fl_*</code>+<code>fs_resolve</code>), dispositivos (<code>open/read/write/control/getdev</code>) o subsistemas (red, <code>elf_run</code>); reporta errores por <code>stderr</code>/<code>fprintf</code> y retorna <code>OK/SYSERR</code>. <b>Quién invoca al comando:</b> el bucle de la shell (<code>shell.c</code>), en la hebra de consola o en una sesión telnet.</div>
+
+</main>
+</body>
+</html>

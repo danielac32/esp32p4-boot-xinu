@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>X — Manual de LVGL en Xinu-P4.2 | Aprender a crear pantallas</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--stamp:#8b2e2e;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}
+body{margin:0 auto;max-width:1140px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}
+.mast a:hover{background:var(--accent2);color:#fff}.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}
+h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule)} 
+h3{font-size:17px;margin:15px 0 4px;color:var(--accent2)}
+h4{font:700 13.5px var(--mono);margin:11px 0 3px;color:var(--stamp)}
+p,li{margin:5px 0} ul,ol{margin:5px 0 5px 20px;padding:0}
+code{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.8px/1.45 var(--mono);white-space:pre-wrap}
+pre .c{color:#b7a98e}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}
+.warn{border-left-color:#b06500}.danger{border-left-color:var(--stamp)}.ok{border-left-color:#1b8a4c}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0;background:var(--hi)}
+th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}
+th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.step{background:#efe9d4;border:1px dashed var(--accent);padding:9px 11px;margin:8px 0}
+.sig{font:12.5px var(--mono);color:#1a3a44;background:#e8efe8;border:1px solid #b9ccb9;padding:6px 8px;display:block;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo X — Manual de LVGL (aprender a usar y crear pantallas)</h1></div>
+<main>
+
+<div class="note"><b>Propósito.</b> Este capítulo es un manual práctico para aprender a usar LVGL v8 <em>dentro de Xinu-P4.2</em>: cómo está integrado, qué reglas seguir, cómo crear objetos y pantallas, cómo manejar eventos, qué estructura de datos usar en una app ELF, y ejemplos completos. Todo lo aquí descrito corresponde al port real (<code>device/lvgl/</code>, <code>examples/p4-elfsdk/apps/lib/gestos.*</code>, apps en <code>/apps/</code>).</div>
+
+<h2>1. Cómo está integrado LVGL en este sistema</h2>
+<h3>1.1 Componentes</h3>
+<table>
+<tr><th>Componente</th><th>Ubicación</th><th>Función</th></tr>
+<tr><td>Librería LVGL v8</td><td><code>lvgl/</code> (vendor)</td><td>Motor gráfico (objetos, estilos, layouts, timers, render).</td></tr>
+<tr><td>Port / device</td><td><code>device/lvgl/lvglport.c</code>, <code>lvglfs.c</code>, <code>include/lvgl.h</code></td><td>Conecta LVGL al LCD (flush) y al touch (input), avanza el tick y bombea timers, serializa el acceso.</td></tr>
+<tr><td>Hebra de UI</td><td><code>lvglTask()</code> → nombre <code>"lvglui"</code> (8 KB pila, <code>LVGL_TASK_MS=5</code>)</td><td>Llama <code>lvgl_lock(); lv_tick_inc(...); lv_timer_handler(); lvgl_unlock(); sleep(5)</code> en bucle. <b>Es quien refresca la pantalla y ejecuta callbacks de LVGL.</b></td></tr>
+<tr><td>Exclusión</td><td><code>lvglmon</code> (monitor) → <code>lvgl_lock()</code>/<code>lvgl_unlock()</code> (exportados)</td><td>LVGL no es reentrante: toda llamada a su API debe serializarse.</td></tr>
+<tr><td>Salida</td><td><code>lvgl_flush_cb</code> → <code>control(LCD0, LCD_CTRL_BLIT, &b, 0)</code></td><td>Envía el área renderizada (RGB565) al ST7796 por SPI2. Mantiene <code>lvgl_shadow</code> (320×480 RGB565 en PSRAM) para capturas.</td></tr>
+<tr><td>Entrada</td><td><code>lvgl_touch_cb</code> → <code>control(TOUCH0, TOUCH_CTRL_READ, &pt, 1)</code></td><td>Entrega <code>PRESSED/RELEASED</code> + coordenadas. Gestiona apagado por inactividad/despertar.</td></tr>
+<tr><td>FS para imágenes</td><td><code>lvglfs.c</code> (letra <code>S:</code>)</td><td>Permite <code>lv_img_set_src(img, "S:/apps/x/icon.jpg")</code> (SJPG con <code>LV_USE_SJPG</code>).</td></tr>
+</table>
+
+<h3>1.2 El modelo de ejecución (lo más importante)</h3>
+<div class="danger note">
+<b>Regla de oro.</b> Solo la hebra <code>lvglui</code> debe ejecutar <code>lv_timer_handler()</code> (lo hace el port). <b>Las apps NO llaman a <code>lv_timer_handler()</code> ni a <code>lv_tick_inc()</code>.</b> Los <b>callbacks de eventos de LVGL</b> (click, value changed, ready del teclado, etc.) se ejecutan <em>dentro</em> de <code>lv_timer_handler()</code>, es decir, en la hebra <code>lvglui</code> y <b>con <code>lvglmon</code> ya tomado</b>.
+</div>
+<p>Consecuencias obligatorias:</p>
+<ul>
+<li>Desde <b>tu hebra</b> (el <code>main</code> de la app, un hilo reproductor, etc.): rodea <u>toda</u> llamada a API LVGL con <code>lvgl_lock(); ... lvgl_unlock();</code>. Ej.: crear widgets, <code>lv_label_set_text</code>, <code>lv_obj_del</code>, leer <code>lv_textarea_get_text</code> si lo haces fuera de callback (o hazlo con cuidado).</li>
+<li>Desde un <b>callback LVGL</b>: <u>NO</u> llames a <code>lvgl_lock()</code>/<code>lvgl_unlock()</code> (no es recursivo) y <u>NO</u> llames a funciones que lo tomen (p. ej. helpers de <code>gestos</code> que hacen lock internamente — lee <code>gestos.h</code>: los callbacks de gestos solo encolan). <u>NO</u> llames a <code>exit()</code> desde un callback: <code>exit()</code> → <code>kill(gettid())</code> mataría <code>lvglui</code> (la hebra actual), no tu app, y corrompería la UI.</li>
+<li>Patrón correcto desde callback: <b>solo señalar</b> (poner un flag <code>volatile</code>, guardar un dato ya preparado) y que el bucle de <code>main</code> de tu app procese la acción (conectar WiFi, escribir fichero, cerrar).</li>
+<li>Minimiza el tiempo con el lock tomado: no hagas I/O de SD, <code>sleep</code> largos ni trabajo pesado dentro de la sección crítica. Para animaciones/espectros, actualiza con throttling (p. ej. cada 50–100 ms) y solo si visible.</li>
+</ul>
+
+<h3>1.3 Memoria y objetos LVGL</h3>
+<p>LVGL usa su heap interno (configurado en <code>lv_conf.h</code>, alimentado desde PSRAM en este port) más los buffers de dibujo en PSRAM (<code>DRAW_LINES</code>, doble buffer). Los objetos <code>lv_obj_t*</code> viven en el heap de LVGL; tu app solo guarda <em>punteros</em> a ellos. Borrar el padre borra hijos (<code>lv_obj_del</code> / <code>lv_obj_clean</code>). Al salir, destruye la UI que creaste (<code>gestos_cerrar</code> lo hace para lo de gestos) antes de <code>exit()</code>.</p>
+
+<h2>2. Conceptos básicos de LVGL v8 (referencia rápida)</h2>
+<table>
+<tr><th>Concepto</th><th>API representativa</th><th>Notas</th></tr>
+<tr><td>Objeto base</td><td><code>lv_obj_t *o = lv_obj_create(parent);</code></td><td>Todo cuelga de un padre. Raíz: <code>lv_scr_act()</code>.</td></tr>
+<tr><td>Tamaño/posición</td><td><code>lv_obj_set_size</code>, <code>lv_obj_set_pos</code>, <code>lv_obj_align</code>, <code>lv_obj_set_width/height</code></td><td>Coords en píxeles de la pantalla (320×480 vertical, RGB565).</td></tr>
+<tr><td>Estilos (colores, bordes, radio, texto)</td><td><code>lv_obj_set_style_bg_color</code>, <code>bg_opa</code>, <code>radius</code>, <code>border_width</code>, <code>text_color</code>, <code>pad_*</code> (+ <code>LV_PART_MAIN/...</code>, <code>LV_STATE_DEFAULT/...</code>)</td><td>Colores: <code>lv_color_make(r,g,b)</code> o <code>lv_color_hex(0xRRGGBB)</code> (ojo: macros/inline — en apps, según export; usa helpers disponibles o <code>lv_color_make</code>).</td></tr>
+<tr><td>Etiqueta</td><td><code>lv_label_create</code>, <code>lv_label_set_text</code>, <code>lv_label_set_text_fmt</code></td><td>Texto en pantalla.</td></tr>
+<tr><td>Botón</td><td><code>lv_btn_create</code> + <code>lv_label_create(btn)</code></td><td>Objeto clicable (recibe eventos).</td></tr>
+<tr><td>Imagen</td><td><code>lv_img_create</code>, <code>lv_img_set_src(img,"S:/ruta/icon.jpg")</code></td><td>Vía FS <code>S:</code> (SD). SJPG decodifica en CPU (costoso si se repite).</td></tr>
+<tr><td>Área de texto / teclado</td><td><code>lv_textarea_create</code>, <code>lv_keyboard_create</code>, <code>lv_keyboard_set_textarea</code></td><td>Usado en <code>settings</code> (clave visible).</td></tr>
+<tr><td>Contenedor/scroll</td><td><code>lv_obj_create</code> con flags de scroll, tamaños</td><td>Listas desplazables.</td></tr>
+<tr><td>Eventos</td><td><code>lv_obj_add_event_cb(obj, cb, LV_EVENT_CLICKED, user_data)</code></td><td>Callback corre en <code>lvglui</code> bajo lock (ver §1.2).</td></tr>
+<tr><td>Mostrar/ocultar</td><td><code>lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN)</code> / <code>lv_obj_clear_flag</code></td><td>Útil para cambiar de “pantalla” sin destruir.</td></tr>
+<tr><td>Temporizadores LVGL</td><td><code>lv_timer_create</code>, etc.</td><td>Los despacha <code>lv_timer_handler()</code> (la hebra <code>lvglui</code>).</td></tr>
+</table>
+<div class="note warn">Algunas utilidades de LVGL 8.3 son macros/inline (p. ej. <code>lv_scr_act</code>, <code>lv_pct</code>, ciertos colores) y se expanden en tu <code>.c</code>; otras son funciones exportadas. Si un símbolo da <code>UND</code> al cargar el ELF, verifica que sea función exportada (sección VIII) o usa la forma expandible disponible en tus cabeceras.</div>
+
+<h2>3. Usar la librería <code>gestos</code> (recomendada para apps con touch)</h2>
+<p><code>gestos</code> (<code>examples/p4-elfsdk/apps/lib/gestos.c/h</code>) simplifica el touch: crea un fondo, clasifica gestos y entrega eventos por un <b>anillo</b> que consumes en tu bucle (modelo hebra-seguro respecto a callbacks LVGL).</p>
+<span class="sig">gestos_t *gestos_nueva(void);  gestos_t *gestos_nueva_partes(int partes);<br>void gestos_cerrar(gestos_t*);  int gestos_leer(gestos_t*, gev_t *out);<br>void gestos_boton(g,id,texto,x,y,w,h,color);  void gestos_boton_en(g,raiz,...);<br>void gestos_botones_limpiar(g);  void gestos_nota(g,texto);  void gestos_pastilla(g,texto);<br>lv_obj_t *gestos_raiz(g);  void gestos_show(g, mostrar);</span>
+<p><b>Eventos (<code>gev_t</code>):</b> <code>tipo</code> = <code>GE_NADA, GE_ARRASTRE, GE_TOQUE, GE_LARGA, GE_BOTON</code>; campos <code>dir</code> (<code>GE_ARRIBA/ABAJO/IZQ/DER</code>), <code>x1,y1,x2,y2,dx,dy</code>, <code>id</code>. <code>gestos_leer</code> devuelve 1 si había evento (lo saca), 0 si no.</p>
+<pre><span class="c">/* Bucle típico de app */</span>
+for (;;) {
+    gev_t ev;
+    if (appmgr_get_state(mi_slot) == APP_CLOSING) break;  <span class="c">/* cierre cooperativo */</span>
+    if (!gestos_leer(g, &amp;ev)) { sleep(50); continue; }    <span class="c">/* sin evento: ceder CPU */</span>
+    if (ev.tipo == GE_BOTON) { /* ev.id → acción */ }
+    else if (ev.tipo == GE_ARRASTRE &amp;&amp; ev.dir == GE_ARRIBA) { /* p. ej. ir a fondo */ }
+}</pre>
+<p><b>Importante:</b> <code>gestos_cerrar(g)</code> se llama <u>desde tu bucle/main</u> antes de <code>exit()</code>, nunca desde un callback LVGL. <code>gestos_boton*</code>/limpiar manipulan LVGL internamente (toman lock) — llámalos desde tu hebra, no desde un callback.</p>
+
+<h2>4. La estructura de estado de una app (<code>struct</code> en PSRAM) — patrón obligatorio</h2>
+<div class="danger note"><b>Sin estáticas escribibles de fichero.</b> El cargador ELF de este sistema no aplica <code>R_RISCV_LO12_S</code>; una global/estática mutable produce accesos corruptos. <b>Toda</b> la mutablez va en una estructura asignada en runtime (PSRAM o heap) apuntada por una variable local/puntero.</div>
+
+<h3>4.1 Anatomía (basada en <code>struct ajustes</code> de <code>settings.c</code>)</h3>
+<pre>struct miapp {
+    <span class="c">/* --- núcleo UI/gestión --- */</span>
+    gestos_t    *g;            <span class="c">/* handle de gestos (o NULL si usas LVGL directo) */</span>
+    int          slot;         <span class="c">/* slot de appmgr (ciclo cooperativo) */</span>
+    int          pantalla;     <span class="c">/* máquina de estados: P_MENU, P_LISTA, P_DETALLE... */</span>
+
+    <span class="c">/* --- punteros a objetos LVGL que necesitas reusar/leer --- */</span>
+    lv_obj_t    *titulo;
+    lv_obj_t    *estado;
+    lv_obj_t    *lista;        <span class="c">/* contenedor scroll */</span>
+    lv_obj_t    *campo;        <span class="c">/* lv_textarea, si aplica */</span>
+    lv_obj_t    *tecla;        <span class="c">/* lv_keyboard, si aplica */</span>
+
+    <span class="c">/* --- datos de dominio --- */</span>
+    int          nitems;
+    /* ... arrays/buffers de trabajo (evitan static y malloc repetido) ... */
+    char         texto[80];    <span class="c">/* snprintf temporal */</span>
+
+    <span class="c">/* --- señal callback → bucle main (la forma segura) --- */</span>
+    volatile int accion;       <span class="c">/* 1 = el teclado/evento pidió hacer algo */</span>
+    volatile int dato;         <span class="c">/* payload simple si hace falta */</span>
+};</pre>
+
+<h3>4.2 Por qué cada parte</h3>
+<ul>
+<li><b><code>g</code> + <code>slot</code>:</b> UI y registro en el gestor de apps (para que el launcher te retome/cierre cooperativamente y tú obedezcas <code>APP_CLOSING</code>/<code>APP_BACKGROUND</code>).</li>
+<li><b><code>pantalla</code> (máquina de estados):</b> una app real tiene varias vistas. Un <code>enum/#define P_*</code> + una función <code>mostrar_X(m)</code> por vista mantiene el flujo claro. Al cambiar: <code>gestos_botones_limpiar(m-&gt;g)</code> (libera IDs/cupo), reconstruye/actualiza widgets y <code>m-&gt;pantalla = P_X</code>.</li>
+<li><b>Punteros <code>lv_obj_t*</code>:</b> para actualizar texto (<code>lv_label_set_text(m-&gt;estado,...)</code> bajo lock desde tu hilo) o leer valores (<code>lv_textarea_get_text</code>) sin buscar en el árbol.</li>
+<li><b>Buffers dentro del struct:</b> evitan estáticas y fragmentación; dimensiona al peor caso real (p. ej. 2048 bytes para leer/reescribir <code>/wifi.txt</code>, como hace settings).</li>
+<li><b><code>volatile accion</code>:</b> el <em>único</em> puente seguro callback→main. El callback (en <code>lvglui</code>) hace solo <code>m-&gt;accion = 1;</code>; el bucle principal ve el flag, lo limpia a 0 y ejecuta el trabajo pesado (FAT, WiFi <code>wifinet</code>, lógica) fuera del callback y coordinando el lock si toca la UI.</li>
+</ul>
+
+<h3>4.3 Cómo se crea y destruye</h3>
+<pre>int main(int argc, char *argv[]) {
+    struct miapp *m = psram_malloc(sizeof(*m));   <span class="c">/* o malloc; PSRAM para structs grandes */</span>
+    if (!m) exit(1);
+    memset(m, 0, sizeof(*m));                     <span class="c">/* estado limpio: punteros NULL, contadores 0 */</span>
+
+    m-&gt;g = gestos_nueva_partes(GE_PASTILLA|GE_NOTA);  <span class="c">/* o gestos_nueva() / 0 adornos */</span>
+    if (!m-&gt;g) { psram_free(m); exit(1); }
+    m-&gt;slot = appmgr_register("miapp", "/apps/miapp/app.elf", 0x6688AA, gettid());
+
+    construir_ui(m); mostrar_menu(m); m-&gt;pantalla = P_MENU;
+    bucle_principal(m);
+
+    <span class="c">/* salida ordenada */</span>
+    gestos_cerrar(m-&gt;g);          <span class="c">/* desmonta UI de gestos */</span>
+    appmgr_unregister(m-&gt;slot);   <span class="c">/* libera slot */</span>
+    psram_free(m);
+    exit(0);                       <span class="c">/* kill(gettid): libera la imagen ELF (elf_img) */</span>
+}</pre>
+
+<h2>5. Crear pantallas (patrones concretos)</h2>
+<h3>5.1 Pantalla con botones (usando gestos)</h3>
+<pre>static void mostrar_menu(struct miapp *m) {
+    gestos_botones_limpiar(m-&gt;g);                 <span class="c">/* reset de la vista */</span>
+    gestos_pastilla(m-&gt;g, "Mi App");
+    gestos_nota(m-&gt;g, "Elige una opcion");
+    <span class="c">/* gestos_boton(g, id, texto, x, y, w, h, color_rgb565/0xRRGGBB según API) */</span>
+    gestos_boton(m-&gt;g, 1, "OPCION A",  20, 120, 280, 50, 0x2A6A9A);
+    gestos_boton(m-&gt;g, 2, "OPCION B",  20, 185, 280, 50, 0x2A6A9A);
+    gestos_boton(m-&gt;g, 9, "SALIR",     20, 400, 280, 50, 0xC04040);
+}
+<span class="c">/* en el bucle: if (ev.tipo==GE_BOTON) switch(ev.id) { case 1: ...; case 9: salir; } */</span></pre>
+
+<h3>5.2 Pantalla con LVGL directo (etiqueta + actualización desde tu hilo)</h3>
+<pre>static void construir_ui(struct miapp *m) {
+    lvgl_lock();
+    lv_obj_t *scr = lv_scr_act();                <span class="c">/* o gestos_raiz(m-&gt;g) */</span>
+    m-&gt;titulo = lv_label_create(scr);
+    lv_label_set_text(m-&gt;titulo, "Estado");
+    lv_obj_align(m-&gt;titulo, LV_ALIGN_TOP_MID, 0, 10);
+    m-&gt;estado = lv_label_create(scr);
+    lv_label_set_text(m-&gt;estado, "Iniciando...");
+    lv_obj_align(m-&gt;estado, LV_ALIGN_CENTER, 0, 0);
+    lvgl_unlock();
+}
+static void set_estado(struct miapp *m, const char *txt) {
+    lvgl_lock();
+    lv_label_set_text(m-&gt;estado, txt);
+    lvgl_unlock();
+}</pre>
+
+<h3>5.3 Entrada de texto con teclado (patrón seguro, como <code>settings</code>)</h3>
+<pre><span class="c">/* 1) Crear campo + teclado (bajo lock, desde tu hilo al montar la pantalla) */</span>
+lvgl_lock();
+m-&gt;campo = lv_textarea_create(lv_scr_act());
+lv_textarea_set_password_mode(m-&gt;campo, false); <span class="c">/* visible, útil en touch pequeño */</span>
+lv_obj_set_size(m-&gt;campo, 280, 40);
+lv_obj_align(m-&gt;campo, LV_ALIGN_TOP_MID, 0, 60);
+m-&gt;tecla = lv_keyboard_create(lv_scr_act());
+lv_keyboard_set_textarea(m-&gt;tecla, m-&gt;campo);
+lv_obj_add_event_cb(m-&gt;tecla, teclado_cb, LV_EVENT_ALL, m); <span class="c">/* user_data = tu struct */</span>
+lvgl_unlock();
+
+<span class="c">/* 2) Callback (corre en lvglui, CON lock): NO lock, NO exit, NO I/O pesado */</span>
+static void teclado_cb(lv_event_t *e) {
+    struct miapp *m = (struct miapp *)lv_event_get_user_data(e);
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+        m-&gt;accion = 1;  <span class="c">/* solo señal; main leerá el texto y actuará */</span>
+    }
+}
+
+<span class="c">/* 3) En el bucle de main: procesar fuera del callback */</span>
+if (m-&gt;accion) {
+    m-&gt;accion = 0;
+    const char *txt;
+    lvgl_lock();
+    txt = lv_textarea_get_text(m-&gt;campo);  <span class="c">/* leer bajo lock */</span>
+    /* copiar a tu buffer si vas a soltar el lock antes de usarlo */
+    strncpy(m-&gt;texto, txt ? txt : "", sizeof(m-&gt;texto)-1);
+    lvgl_unlock();
+    /* ahora: conectar, guardar en /wifi.txt, etc. (puede hacer I/O/FAT/red) */
+}</pre>
+
+<h3>5.4 Varias pantallas (máquina de estados)</h3>
+<pre>#define P_MENU 0
+#define P_LISTA 1
+#define P_EDITA 2
+
+static void ir_a(struct miapp *m, int p) {
+    gestos_botones_limpiar(m-&gt;g);
+    m-&gt;pantalla = p;
+    if (p == P_MENU) mostrar_menu(m);
+    else if (p == P_LISTA) mostrar_lista(m);
+    else if (p == P_EDITA) mostrar_edita(m);
+}
+<span class="c">/* en el bucle: despacha ev según m-&gt;pantalla */</span></pre>
+
+<h2>6. Ejemplo completo mínimo (app LVGL con gestos + appmgr)</h2>
+<pre><span class="c">/* miapp.c — esqueleto realista */</span>
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;kernel.h&gt;
+#include &lt;thread.h&gt;
+#include &lt;timer.h&gt;
+#include &lt;memory.h&gt;
+#include &lt;appmgr.h&gt;
+#include "gestos.h"
+
+void exit(int codigo);
+
+#define P_HOME 0
+#define B_HOLA 1
+#define B_SALIR 2
+
+struct miapp { gestos_t *g; int slot; int pantalla; int cuenta; char texto[48]; };
+
+static void pantalla_home(struct miapp *m) {
+    gestos_botones_limpiar(m-&gt;g);
+    gestos_pastilla(m-&gt;g, "Mi App");
+    gestos_boton(m-&gt;g, B_HOLA,  "PULSAME", 60, 180, 200, 60, 0x2A6A9A);
+    gestos_boton(m-&gt;g, B_SALIR, "SALIR",   60, 260, 200, 50, 0xB04040);
+    sprintf(m-&gt;texto, "Pulsaciones: %d", m-&gt;cuenta);
+    gestos_nota(m-&gt;g, m-&gt;texto);
+    m-&gt;pantalla = P_HOME;
+}
+
+int main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    struct miapp *m = psram_malloc(sizeof(*m));
+    if (!m) { kprintf("miapp: sin memoria\r\n"); exit(1); }
+    memset(m, 0, sizeof(*m));
+
+    m-&gt;g = gestos_nueva_partes(GE_PASTILLA|GE_NOTA);
+    if (!m-&gt;g) { psram_free(m); exit(1); }
+    m-&gt;slot = appmgr_register("miapp", "/apps/miapp/app.elf", 0x6688AA, gettid());
+
+    pantalla_home(m);
+    for (;;) {
+        int st = appmgr_get_state(m-&gt;slot);
+        if (st == APP_CLOSING) break;                 <span class="c">/* cierre cooperativo pedido */</span>
+        if (st == APP_BACKGROUND) { sleep(100); continue; } <span class="c">/* en fondo: no pintar */</span>
+
+        gev_t ev;
+        if (!gestos_leer(m-&gt;g, &amp;ev)) { sleep(50); continue; }
+        if (ev.tipo == GE_ARRASTRE &amp;&amp; ev.dir == GE_ARRIBA) {
+            appmgr_set_state(m-&gt;slot, APP_BACKGROUND);
+            gestos_show(m-&gt;g, 0);                     <span class="c">/* ocultar al ir a fondo */</span>
+        } else if (ev.tipo == GE_BOTON &amp;&amp; ev.id == B_HOLA) {
+            m-&gt;cuenta++; pantalla_home(m);
+        } else if (ev.tipo == GE_BOTON &amp;&amp; ev.id == B_SALIR) {
+            break;
+        }
+    }
+
+    gestos_cerrar(m-&gt;g);
+    appmgr_unregister(m-&gt;slot);
+    psram_free(m);
+    exit(0);
+}</pre>
+<div class="note ok">Al volver de <code>APP_BACKGROUND</code> a <code>APP_RUNNING</code> (el launcher hace <code>take_foreground</code>), tu bucle debe detectar el cambio y llamar <code>gestos_show(m-&gt;g, 1)</code> / redibujar según tu diseño (patrón usado en las apps reales).</div>
+
+<h2>7. Rendimiento y depuración</h2>
+<ul>
+<li><b>Lock corto:</b> agrupa cambios de UI en un bloque lock/unlock, pero saca I/O y cómputo pesado fuera.</li>
+<li><b>Throttling:</b> espectro/animaciones cada 50–100 ms; solo si la pantalla está visible/foreground.</li>
+<li><b>Imágenes:</b> SJPG desde SD es lento (decode CPU + I/O). Para iconos repetidos, cachea RGB565 en PSRAM o usa <code>.bin</code> pre-convertido.</li>
+<li><b>Captura de pantalla:</b> <code>lvglShotBmp("/shot.bmp")</code> / API <code>/api/shot</code> del httpd para diagnosticar sin mirar la placa.</li>
+<li><b>Si la UI “muere”:</b> revisa si alguien tomó <code>lvgl_lock</code> y bloqueó, si un callback llamó <code>exit()</code>/lock, o si la pantalla se apagó por inactividad.</li>
+</ul>
+
+<div class="note"><b>Resumen de reglas.</b> (1) <code>lvgl_lock/unlock</code> desde tu hebra, nunca en callback LVGL. (2) Callbacks solo señalan (<code>volatile</code>), el trabajo va en <code>main</code>. (3) Nunca <code>exit()</code> en callback. (4) Sin estáticas mutables → todo en <code>struct</code> asignada en runtime. (5) <code>gestos_cerrar</code> + <code>appmgr_unregister</code> + <code>psram_free</code> + <code>exit</code> desde <code>main</code>. (6) Obedece <code>APP_CLOSING</code> cooperativamente.</div>
+
+</main>
+</body>
+</html>

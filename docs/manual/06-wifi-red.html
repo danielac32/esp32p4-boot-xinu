@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VI — WiFi y pila de red | Manual Xinu-P4.2</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}body{margin:0 auto;max-width:1140px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}.mast a:hover{background:var(--accent2);color:#fff}.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule)}h3{font-size:17px;margin:15px 0 4px;color:var(--accent2)}
+p,li{margin:5px 0}ul,ol{margin:5px 0 5px 20px;padding:0}code{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.6px/1.45 var(--mono);white-space:pre-wrap}.c{color:#b7a98e}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}.warn{border-left-color:#b06500}.danger{border-left-color:#8b2e2e}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0;background:var(--hi)}th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.file{font:700 12.5px var(--mono);color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo VI — WiFi y pila de red</h1></div>
+<main>
+<div class="note"><b>Objetivo.</b> Explicar cómo el ESP32-P4 se conecta a WiFi usando el ESP32-C6 como coprocesador de red (SDIO/esp_hosted) y cómo funciona la <b>pila nativa de Xinu</b> (ARP/IPv4/ICMP/UDP/TCP/DHCP) sobre <code>ETH0</code> (<code>espeth</code>). Incluye código/flujo, uso y quién llama a cada parte.</div>
+
+<h2>1. Arquitectura y flujo de datos</h2>
+<pre>Shell/Apps/Servidores (httpd, telnetd, udpserver, ping, dns, settings/wifinet)
+        │
+  Sockets Xinu: TCP (NTCP) · UDP (NUDP) · RAW (NRAW)  <span class="c">[device/tcp,udp,raw]</span>
+        │
+  Pila nativa: IPv4 · ICMP · ARP · rutas · DHCP      <span class="c">[network/*, netInit]</span>
+        │  (pool bfp de paquetes, hilos de red/tcpTimer)
+     netif / ETH0
+        │
+  espeth (device/espeth-esp32p4): tramas Ethernet crudas
+        │
+  esp_hosted (SDIO): RPC/control + datos con el C6
+        │  <span class="c">SDMMC slot 1, bus compartido con microSD → sdmmcBusLock</span>
+     ESP32-C6 (WiFi 6)</pre>
+<p><b><code>sysinit()</code></b> (si <code>NNETIF</code>) llama <code>netInit()</code> → crea pool de paquetes (<code>bfp</code>, <code>NET_MAX_PKTLEN+sizeof(packet)</code>, <code>NET_POOLSIZE</code>), inicializa tablas/estado y temporizadores (p. ej. <code>tcpTimer</code>). <code>espethInit/Open/Read/Write/Control</code> conectan la pila al transporte hosted.</p>
+
+<h2>2. Transporte WiFi: ESP-Hosted sobre SDIO (ESP32-C6)</h2>
+<h3>2.1 Medio físico y concurrencia</h3>
+<p>El C6 está en el <b>slot 1</b> del SDMMC compartido con la microSD (slot 0). Toda transacción del bus toma <code>sdmmcBusLock()</code> (monitor reentrante, <code>system/sdmmcbus.c</code>). Consecuencia: tráfico WiFi y lecturas FAT compiten en latencia/caudal.</p>
+<h3>2.2 RPC y datos (código/flujo)</h3>
+<ul>
+<li><b>Control (RPC TLV/protobuf):</b> peticiones y respuestas sobre SDIO. Respuesta típica <code>id_respuesta = id_peticion + 256</code>. Funciones usadas: versión, init WiFi (requerido antes de otras RPC; evita 0x3001), MAC, modo STA, config, conectar/desconectar, escaneo (iniciar, nº de registros, fetch de registro i con bssid/ssid/canal/RSSI), señal del AP asociado (RPC 294, medido en placa), eventos (estado STA/scan/config). Ids concretos aparecen en <code>xsh_wifi</code>/<code>xsh_wifi_scan.c</code> y la capa <code>wifinet</code>.</li>
+<li><b>Attach (<code>wifi up</code>):</b> serializado por semáforo (un solo C6; attach concurrente corrompe <code>s_ctx</code>, medido). Escalera de configs (default/pullups/safe-1bit, ref. SDK). Tras adjuntar, sondea tramas y procesa el <b>handshake PRIV</b> (capacidades del host) — sin él el C6 ignora RPCs.</li>
+<li><b>Datos (tramas):</b> <code>espethRead</code> entrega una trama Ethernet cruda (sin cabecera hosted, retirada por transporte); <code>espethWrite</code> envía una trama. RX por sondeo/bombeo según integración.</li>
+<li><b>Carrera RPC vs recepción (corregida):</b> la hebra de red podía consumir respuestas RPC; se protege el camino RPC (<code>disable/restore</code> en tramo crítico + <code>sdmmcBusLock</code> + anillo/raw-RPC en control) para que <code>wifi signal/scan</code> funcionen con la pila activa.</li>
+</ul>
+<p><b>Debug:</b> <code>ESP_HOSTED_CTRL_DEBUG</code>/<code>ESP_HOSTED_SDIO_DEBUG</code> en <code>platformVars</code> (apagados por defecto: ruidosos con TCP). <b>Quién llama:</b> <code>xsh_wifi</code>, <code>netboot</code>, y la API exportada <code>wifinet</code> (usada por <code>settings</code>).</p>
+
+<h2>3. Dispositivo <code>espeth</code> (ETH0)</h2>
+<p><span class="file">device/espeth-esp32p4/espeth*.c</span>: <code>Init/Open/Close/Read/Write/Control</code>. Abstrae el C6 como interfaz Ethernet para la pila nativa. <code>Control</code> expone enlace/MAC/estadísticas (rx/tx/drops) según integración. Instancia <code>ETH0</code> (esperada por DHCP/pila en <code>[ETH0, ETH0+NETHER)</code>).</p>
+
+<h2>4. Pila nativa de Xinu (componentes y llamadas)</h2>
+<table>
+<tr><th>Capa</th><th>Código</th><th>Función</th><th>Quién la usa</th></tr>
+<tr><td>Inicialización</td><td><code>network/net</code>, <code>netInit</code></td><td>Pool bfp, tablas, temporizador TCP (<code>tcpTimer</code>).</td><td><code>sysinit</code> (si <code>NNETIF</code>).</td></tr>
+<tr><td>ARP</td><td><code>network/arp</code></td><td>Resolución IP→MAC, caché.</td><td>IPv4/envío; <code>arp</code>/<code>ping</code>.</td></tr>
+<tr><td>IPv4/ICMP</td><td><code>network/ipv4</code>, <code>network/icmp</code></td><td>Demux y eco.</td><td>Recepción; <code>ping</code>.</td></tr>
+<tr><td>Rutas</td><td><code>network/route</code></td><td>Encaminamiento.</td><td>Pila; <code>route</code>.</td></tr>
+<tr><td>UDP</td><td><code>network</code> + <code>device/udp</code> (<code>UDP0-1</code>, <code>udptab[NUDP]</code>)</td><td>Sockets datagrama.</td><td>DHCP, DNS, <code>udpserver</code>.</td></tr>
+<tr><td>TCP</td><td><code>network</code> + <code>device/tcp</code> (<code>TCP0-7</code>, <code>tcptab[NTCP]</code>)</td><td>Conexión fiable, estados, timeouts (<code>TCP_CTRL_RCVTIMEO</code>).</td><td><code>httpd</code>, <code>telnetd</code>, clientes.</td></tr>
+<tr><td>RAW</td><td><code>device/raw</code> (<code>RAW0-1</code>)</td><td>IPv4 crudo.</td><td>Diagnóstico/servicios especiales.</td></tr>
+<tr><td>DHCP</td><td><code>network/dhcpc</code></td><td>Obtiene IP/máscara/gateway/DNS.</td><td><code>netboot</code> / <code>dhcpc ETH0</code>.</td></tr>
+</table>
+
+<h2>5. Puesta en marcha y diagnóstico</h2>
+<p><b>Automática:</b> <code>netboot</code> orquesta WiFi + asociación (credenciales/fichero, p. ej. <code>/wifi.txt</code> leído por el flujo) + DHCP + servicios. Con AP inexistente los reintentos pueden demorar; con AP correcta, decenas de segundos (medido). <b>Manual:</b> <code>wifi up</code> → <code>wifi scan/join</code> (o <code>wifi connect</code> según subcomando) → <code>dhcpc ETH0</code> → <code>ifconfig/ping/dns</code>. <b>Desde apps:</b> API <code>wifinet</code> exportada (escanear, asociar, estado) — usada por <code>settings</code>.</p>
+
+<h2>6. Patrón de servidor TCP (referencia, usado por httpd/telnetd)</h2>
+<pre>dev=getdev("TCPx"); tcpInit(); tcpRegister(dev);
+tid=tcpAlloc(port,REMOTEPORT,1,TCPSM_NONE,NULL,NULL,dev); tcpAllocPassive(tid);
+open(dev,TCP_PASSIVE); tcpOpen(dev);
+control(dev,TCP_CTRL_RCVTIMEO,ms,0); <span class="c">/* evitar bloqueo eterno */</span>
+<span class="c">/* readline para cabeceras HTTP (\r\n\r\n); hebra releaser para PCB de escucha */</span></pre>
+<p>Servir desde SD toma <code>sdmmcBusLock</code> → impacta WiFi. Buffers grandes <code>static</code> si conviene (una petición a la vez, pila limitada).</p>
+
+<h2>7. Limitaciones conocidas</h2>
+<div class="warn note">
+<ul>
+<li>esp_hosted bare-metal aquí <b>no expone</b> monitor/sniffer, deauth, inyección ni power-save fino del C6 (afecta latencia en reposo). Prácticas: scan/ping/ARP en la red propia.</li>
+<li>Recursos finitos (<code>NUDP/NTCP</code>, pool de paquetes); contención con DHCP/udpserver en escenarios concretos.</li>
+<li>Contención SDMMC (slot 0 vs 1). <code>P4_TIMER_FREQ</code> desajustado (~9/8) afecta timeouts/delays.</li>
+<li><code>httpd</code>: PUT con disciplina de no-truncado (<code>remove</code> antes). <code>udpserver</code> <code>apply</code> bloqueado sin bootloader desde SD.</li>
+</ul>
+</div>
+
+</main>
+</body>
+</html>

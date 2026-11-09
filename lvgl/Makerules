@@ -1,0 +1,37 @@
+# This Makefile builds LVGL v8 (the vendored library in lvgl/) as a Xinu
+# component.  La libreria no llama a nada del kernel salvo su heap, que sale de
+# PSRAM (lv_conf.h: LV_MEM_CUSTOM 1 con psram_malloc/psram_free).
+
+# Name of this component (the directory this file is stored in)
+COMP = lvgl
+
+# Source files: the whole src/ tree except the third-party backends that do not
+# apply to this board (extra/libs = image/FS decoders; draw/* = GPU
+# accelerators for other SoCs).  Paths are relative to lvgl/.
+#
+# De extra/libs solo se compilationa sjpg/ (lv_sjpg.c + tjpgd.c): es el
+# decodificador JPEG por teselas que necesitan las imagenes de las apps java,
+# y no pide nada del exterior.  El resto de libs (png, gif, bmp, freetype,
+# rlottie, ffmpeg, fsdrv) sigue fuera: son .rodata y texto en la ranura del
+# kernel por nada.
+C_FILES = $(shell cd $(TOPDIR)/lvgl && find src -name '*.c' \
+    -not -path 'src/extra/libs/*' \
+    -not -path 'src/draw/arm2d/*' \
+    -not -path 'src/draw/nxp/*' \
+    -not -path 'src/draw/renesas/*' \
+    -not -path 'src/draw/sdl/*' \
+    -not -path 'src/draw/stm32_dma2d/*' \
+    -not -path 'src/draw/swm341_dma2d/*' | sort)
+C_FILES += src/extra/libs/sjpg/lv_sjpg.c src/extra/libs/sjpg/tjpgd.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}
+
+# LVGL's own sources set a couple of variables they end up not using; silence
+# that one warning for the vendored library only (the rest of the kernel keeps
+# the full warning set).
+$(DIR)/src/%.o: $(DIR)/src/%.c
+	@echo -e "\tCompiling" $@
+	$(CC) $(DEPFLAGS) $(CFLAGS) -Wno-unused-but-set-variable -g -o $@ $<

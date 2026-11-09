@@ -50,6 +50,11 @@
  * el pico observado por tarea (stack_peak(), system/stack.c).  El tcpTimer ya
  * no usa INITSTK: pide TCP_TIMER_STK (include/network.h). */
 #define MINSTK      4 * 1024    /**< minimum thread stack size          */
+
+/* JVM_STK y JVM_STK_LAUNCH (16 KB para una hebra java, 32 KB para el launcher)
+ * vivian aqui con su medicion de picos en placa.  Se van con la pila grafica,
+ * aparcada en parked/java-gui/: la documentacion lleva los dos valores y el
+ * por que.  Sin JVM en el kernel no hay hebra que los use. */
 #ifdef JTAG_DEBUG
 #define INITRET   debugret      /**< threads return address for debug   */
 #else                           /* not JTAG_DEBUG */
@@ -72,7 +77,7 @@
 
 /* Expose sizeof(struct thrent) and offsetof(struct thrent, stkdiv) to 
  * assembly files. */
-#define THRENTSIZE 148
+#define THRENTSIZE 160
 #define STKDIVOFFSET 104
 
 #ifndef __ASSEMBLER__
@@ -95,9 +100,6 @@ struct thrent
     bool hasmsg;                /**< nonzero iff msg is valid           */
     struct memblock memlist;    /**< free memory list of thread         */
     int fdesc[NDESC];           /**< device descriptors for thread      */
-    bool elf_task;              /**< TRUE if task loaded from ELF       */
-    void *elf_img;              /**< PSRAM block of loaded ELF image    */
-    uint elf_size;              /**< size of the ELF image block        */
 
     /* ---- instrumentación / contabilidad (2026) ---- */
     uint32_t cpu_ticks;         /**< ticks de 1 ms cargados a la tarea  */
@@ -106,6 +108,11 @@ struct thrent
     uint32_t stk_peak;          /**< uso máximo observado de pila       */
     uint8_t stk_overflow;       /**< TRUE si el SP salió de la pila     */
     uint8_t stk_pad[3];
+
+    /* ---- imagen ELF de la hebra: la libera kill() (system/kill.c) ---- */
+    bool elf_task;              /**< TRUE si la hebra corre un app ELF   */
+    void *elf_img;              /**< cabecera del bloque PSRAM del app   */
+    ulong elf_size;             /**< bytes del bloque, cabecera incluida */
 };
 
 extern struct thrent thrtab[];

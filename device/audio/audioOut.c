@@ -373,16 +373,21 @@ static bool pipeline_launch(uint32_t desc_addr, uint32_t frames)
     }
 
     /* El volumen se respeta si el usuario lo subio antes; con el codec a cero
-     * (su valor de reset) se arranca en el nivel de prueba. */
+     * (su valor de reset) se arranca en el nivel de prueba.  Se reescribe
+     * SIEMPRE, aunque el registro ya devuelva el valor pedido: quien pidio el
+     * nivel lo pidio con el MCLK parado, y la ganancia no la fija el registro
+     * sino el motor de fade del DAC, que solo trabaja con reloj.  Fiarse del
+     * readback dejaba muda la primera salida despues de arrancar.  Aqui el
+     * reloj ya esta vivo, asi que esta es la primera escritura que cuenca. */
     vol = es8311_get_volume();
     if (vol == 0 || vol == SYSERR)
     {
-        vol = es8311_set_volume(OUT_START_VOLUME);
-        if (vol == SYSERR)
-        {
-            pipeline_teardown();
-            return false;
-        }
+        vol = OUT_START_VOLUME;
+    }
+    if (es8311_set_volume((uint32_t)vol) == SYSERR)
+    {
+        pipeline_teardown();
+        return false;
     }
     if (!es8311_set_mute(false))
     {

@@ -214,13 +214,19 @@ bool audio_in_start(void)
     }
     MEM_BARRIER();
 
-    if (!es8311_start_mic())
+    /* Primero el reloj, despues la ruta del micro.  i2s_rx_start() es lo que
+     * sube el MCLK del dominio TX, del que vive el codec; es8311_start_mic()
+     * escribe entre otras cosas la ganancia digital del ADC (0x17), y esa
+     * ganancia la carga el fade del ADC, que solo funciona con reloj.  Con el
+     * orden antigo la primera toma despues de arrancar se quedaba sin ganancia
+     * aplicada y solo registraba el transitorio de encendido del PGA. */
+    if (!i2s_rx_start())
     {
         return false;
     }
-    if (!i2s_rx_start())
+    if (!es8311_start_mic())
     {
-        (void)es8311_stop_mic();
+        (void)i2s_rx_stop();
         return false;
     }
     if (!ahbdma_in_link(descBus))

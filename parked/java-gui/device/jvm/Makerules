@@ -1,0 +1,39 @@
+# The Simple JVM running on the ESP32-S3 (device component).
+#
+# The portable interpreter lives in jvm/ (shared with the host build and its
+# regression suite).  This component compiles that core for the target,
+# together with:
+#
+#   jvm_io_target.c  the platform seam (fl_* FAT + PSRAM malloc + task kill)
+#   native_*.c       the esp32p4/* native library bodies
+#   jvmglue.c        jvmState allocation + jvmTask + jvm_run_path()
+#
+# Object files land next to each source (like device/net does for drivers/),
+# so the core .o files appear in jvm/ next to the sources; `make clean`
+# removes them (compile/Makefile lists $(TOPDIR)/jvm).
+
+COMP = device/jvm
+
+# Portable VM core (shared with the host build).
+C_FILES  = ../../jvm/class_parser.c          \
+           ../../jvm/constant_pool_parser.c  \
+           ../../jvm/field_pool_parser.c     \
+           ../../jvm/method_pool_parser.c    \
+           ../../jvm/interface_pool_parser.c \
+           ../../jvm/stack.c                 \
+           ../../jvm/heap.c                  \
+           ../../jvm/gc.c                    \
+           ../../jvm/free_pool.c             \
+           ../../jvm/bytecodes.c             \
+           ../../jvm/java_lib.c              \
+           ../../jvm/java_std.c              \
+           ../../jvm/jvm_run.c
+
+# Target platform + natives (uno por modulo) + glue.
+C_FILES += jvm_io_target.c native_hw.c native_io.c native_fat.c native_sys.c \
+           native_lvgl.c native_net.c jvmglue.c
+S_FILES =
+
+# Add the files to the compile source path
+DIR = ${TOPDIR}/${COMP}
+COMP_SRC += ${S_FILES:%=${DIR}/%} ${C_FILES:%=${DIR}/%}

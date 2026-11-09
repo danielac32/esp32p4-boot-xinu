@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IX — Ejemplos, launcher y cómo crear una app nueva | Manual Xinu-P4.2</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--stamp:#8b2e2e;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}
+body{margin:0 auto;max-width:1140px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}
+.mast a:hover{background:var(--accent2);color:#fff}.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}
+h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule)} 
+h3{font-size:17px;margin:15px 0 4px;color:var(--accent2)}
+h4{font:700 13.5px var(--mono);margin:11px 0 3px;color:var(--stamp)}
+p,li{margin:5px 0} ul,ol{margin:5px 0 5px 20px;padding:0}
+code{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.8px/1.45 var(--mono);white-space:pre-wrap}
+pre .c{color:#b7a98e}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}
+.warn{border-left-color:#b06500}.danger{border-left-color:var(--stamp)}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0;background:var(--hi)}
+th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}
+th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.step{background:#efe9d4;border:1px dashed var(--accent);padding:9px 11px;margin:8px 0}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo IX — Ejemplos, launcher y cómo crear una app nueva</h1></div>
+<main>
+
+<div class="note"><b>Contenido.</b> (1) Qué hay hoy: SDK, apps instaladas y estructura en la SD. (2) Cómo funciona el launcher y <code>appmgr</code> (mecanismo real). (3) Guía completa para crear una <b>nueva app con pantalla</b>: qué definir, qué estructura de datos llevar, código, Makefile, instalación y ciclo de vida. Para el uso de LVGL/gestos en detalle ver el <a href="10-lvgl.html">Capítulo X</a>; para el cargador ELF ver el <a href="08-elf.html">Capítulo VIII</a>.</div>
+
+<h2>1. Lo que existe hoy</h2>
+<h3>1.1 Ubicaciones</h3>
+<table>
+<tr><th>Lugar</th><th>Contenido</th></tr>
+<tr><td><code>examples/p4-elfsdk/apps/</code> (fuentes, en el repo)</td><td><code>lib/</code> = runtime compartido de app (<code>start.S</code>, <code>gestos.c/h</code>, <code>estado.c/h</code>). Carpetas de apps: <code>ejemplo</code>, <code>launcher</code>, <code>musica</code>, <code>calculadora</code>, <code>flappy</code>, <code>tictac</code>, <code>settings</code>.</td></tr>
+<tr><td><code>/apps/</code> (microSD, en la placa)</td><td>Apps instaladas. Cada una en <code>/apps/&lt;nombre&gt;/</code> con <code>app.elf</code>, <code>icon.jpg</code>, <code>app.txt</code>. El launcher vive en <code>/apps/launcher/app.elf</code> (se excluye del listado).</td></tr>
+<tr><td><code>system/appmgr.c</code>, <code>include/appmgr.h</code></td><td>Tabla/estados cooperativos compartidos kernel↔apps (misma memoria, sin MMU).</td></tr>
+<tr><td><code>system/main.c</code></td><td>Arranca el launcher (<code>/apps/launcher/app.elf</code>) en su tarea. <b><code>p4demoTask</code> no se modifica.</b></td></tr>
+</table>
+
+<h3>1.2 Formato de instalación: <code>/apps/&lt;dir&gt;/</code></h3>
+<pre>/apps/miapp/app.elf    <span class="c">→ binario ET_REL RV32 (ld -r)</span>
+/apps/miapp/icon.jpg   <span class="c">→ ícono alusivo (≈96×96), mostrado por LVGL (S: + SJPG)</span>
+/apps/miapp/app.txt    <span class="c">→ metadatos para el launcher</span></pre>
+<p><b><code>app.txt</code></b> (clave=valor):</p>
+<pre>name=Mi App
+exec=/apps/miapp/app.elf
+icon=S:/apps/miapp/icon.jpg
+color=0x6688AA</pre>
+<p>Si falta <code>name</code> usa el nombre del directorio; si falta <code>exec</code> asume <code>/apps/&lt;dir&gt;/app.elf</code>. El <b><code>exec</code></b> es la identidad ante <code>appmgr</code> (reutiliza slot por <code>path</code>), así que la app debe registrarse con la <u>misma ruta</u> que pone aquí.</p>
+
+<h3>1.3 Las apps actuales (resumen)</h3>
+<table>
+<tr><th>App</th><th>Qué hace / notas</th></tr>
+<tr><td><code>ejemplo</code></td><td>Probador de <code>gestos</code> (arrastre, toque, larga, botones). Referencia mínima.</td></tr>
+<tr><td><code>launcher</code></td><td>Escanea <code>/apps/*/app.txt</code>, grilla solo-ícono, lanza/retoma, swipe up → fondo/conmutador, cierre cooperativo (X).</td></tr>
+<tr><td><code>musica</code></td><td>MP3 (<code>mp3_*</code>/AUDIO0) con hilo de reproducción cooperativo; puede sonar en fondo. UI con espectro/volumen/título (throttle de refresco bajo <code>lvgl_lock</code>).</td></tr>
+<tr><td><code>settings</code></td><td>WiFi (<code>wifinet</code>): escaneo, selección, teclado LVGL (clave visible, callback→<code>accion</code>), conecta y persiste en <code>/wifi.txt</code> (lee/mezcla/reescribe; cuidado no-truncado). Patrón canónico de <code>struct ajustes</code>.</td></tr>
+<tr><td><code>calculadora</code>, <code>flappy</code>, <code>tictac</code></td><td>Juegos/utilidades con <code>gestos</code>+LVGL y ciclo cooperativo.</td></tr>
+</table>
+
+<h2>2. Cómo funciona el mecanismo (profundidad)</h2>
+<h3>2.1 <code>appmgr</code> — el registro cooperativo</h3>
+<p>Tabla fija <code>table[APPMGR_MAX]</code> (8) en el kernel, exportada. Sin MMU, kernel y apps comparten memoria → basta con llamadas exportadas. Estados: <code>APP_FREE</code>, <code>APP_RUNNING</code> (al frente, pinta/atiende gestos), <code>APP_BACKGROUND</code> (oculta UI, puede seguir viva — p. ej. música), <code>APP_CLOSING</code> (cierre pedido, la app debe salir limpiamente).</p>
+<table>
+<tr><th>Función</th><th>Comportamiento</th><th>Llamador típico</th></tr>
+<tr><td><code>appmgr_register(name,path,color,tid)</code></td><td>Busca slot por <code>path</code> (<code>find_path</code>) y lo reutiliza, o toma uno <code>FREE</code>; copia nombre/path/color/tid, <code>state=APP_RUNNING</code>. Devuelve slot o <code>SYSERR</code>.</td><td>La app, al arrancar</td></tr>
+<tr><td><code>appmgr_unregister(slot)</code></td><td>Marca <code>APP_FREE</code>, limpia.</td><td>La app, al salir</td></tr>
+<tr><td><code>appmgr_find_path</code>/<code>find_tid</code></td><td>Localiza slot.</td><td>Launcher, <code>app_runner</code></td></tr>
+<tr><td><code>appmgr_get_state</code>/<code>set_state</code></td><td>Lee/escribe estado.</td><td>App (obedece), launcher</td></tr>
+<tr><td><code>appmgr_request_close(slot)</code></td><td>Pone <code>APP_CLOSING</code> (cooperativo).</td><td>Launcher (botón X)</td></tr>
+<tr><td><code>appmgr_take_foreground(slot)</code></td><td>Pasa a fondo los <code>APP_RUNNING</code> y pone <code>slot</code> al frente.</td><td>Launcher (retomar)</td></tr>
+</table>
+<div class="note warn"><b>Cooperativo.</b> El launcher <u>no</u> hace <code>kill()</code> directo: pide <code>APP_CLOSING</code> y la app limpia (LVGL, audio, hilos propios, <code>appmgr_unregister</code>) y hace <code>exit()</code>. Así se evitan fugas/corrupción de UI y audio.</div>
+
+<h3>2.2 El launcher: de tocar un ícono a ejecutar el ELF</h3>
+<ol>
+<li><b>Descubrimiento:</b> <code>fl_opendir("/apps")</code> + <code>fl_readdir</code>; ignora <code>.</code> y no directorios y el directorio <code>launcher</code>; para cada uno lee <code>/apps/&lt;dir&gt;/app.txt</code> (<code>lee_archivo</code>) y rellena <code>app_info {name,exec,icon,color}</code>.</li>
+<li><b>Home:</b> grilla de íconos (<code>lv_img</code> con <code>S:</code>/SJPG) sobre controles de <code>gestos</code> (sin texto de nombre). <i>Rendimiento:</i> decode SJPG desde SD, secuencial → aparecen de a uno; solución recomendada: cache RGB565 en PSRAM o <code>.bin</code> pre-convertido.</li>
+<li><b>Lanzar/retomar:</b> al tocar, busca <code>appmgr_find_path(exec)</code>. Si ya hay instancia, <code>take_foreground</code> y muestra su UI. Si no, <code>create(..., app_runner, APP_PRIO, "app", 1, exec)</code> (pila <code>RUN_STK</code>, p. ej. 16 KB) y oculta el launcher (<code>gestos_show(g,0)</code>).</li>
+<li><b><code>app_runner(char *path)</code>:</b> <code>r = elf_run(path, 0, NULL)</code>; si falla, localiza slot por <code>path</code> y <code>appmgr_unregister</code>. Corre en <b>su propia hebra</b>; <code>elf_run</code> salta al app y al terminar (<code>exit</code>→<code>kill</code>) la hebra muere y el kernel libera la imagen ELF en PSRAM.</li>
+<li><b>Conmutador/fondo:</b> swipe arriba → la app se pone <code>APP_BACKGROUND</code> y oculta UI. Swipe arriba en el launcher → tarjetas de activas (Retomar / X). X → <code>request_close</code>. Un vigía detecta cuando no hay <code>APP_RUNNING</code> y vuelve a mostrar el home.</li>
+</ol>
+<pre>static int app_runner(char *path) {
+    int r = elf_run(path, 0, NULL);
+    if (SYSERR == r) { int slot = appmgr_find_path(path); if (slot &gt;= 0) appmgr_unregister(slot); }
+    return 0;
+}</pre>
+
+<h2>3. Guía: crear una app nueva con pantalla (paso a paso)</h2>
+
+<div class="step"><b>Paso A — Diseña la app.</b> Define: (1) <b>nombre/ruta</b> <code>/apps/miapp/app.elf</code>; (2) <b>pantallas</b> (<code>P_HOME</code>, <code>P_DETALLE</code>…); (3) los <b>IDs de botones</b>; (4) los <b>datos</b> que manejas (listas, buffers, conexión) y qué viene de servicios del kernel (<code>wifinet</code>, <code>fl_*</code>, <code>mp3_*</code>, <code>appmgr</code>).</div>
+
+<div class="step"><b>Paso B — Crea la carpeta.</b></div>
+<pre>examples/p4-elfsdk/apps/miapp/
+  miapp.c
+  Makefile
+<span class="c">(reusa ../lib/start.S y, si usas UI, ../lib/gestos.c ../lib/gestos.h)</span></pre>
+
+<div class="step"><b>Paso C — Define la estructura de estado (lo primero en el .c).</b> Sin estáticas mutables: todo aquí. Incluye UI, appmgr, máquina de pantallas, punteros LVGL, buffers y la señal <code>volatile accion</code> si habrá callbacks que disparen trabajo.</div>
+<pre>#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;kernel.h&gt;
+#include &lt;thread.h&gt;
+#include &lt;timer.h&gt;
+#include &lt;memory.h&gt;
+#include &lt;appmgr.h&gt;
+#include "gestos.h"          <span class="c">/* trae lvgl/lvgl.h; o incluye &lt;lvgl.h&gt; si vas directo */</span>
+
+void exit(int codigo);
+
+#define P_HOME    0
+#define P_INFO    1
+#define B_INFO    1
+#define B_VOLVER  2
+#define B_SALIR   9
+
+struct miapp {
+    gestos_t    *g;
+    int          slot;
+    int          pantalla;
+    int          contador;
+    char         texto[64];
+    volatile int accion;      <span class="c">/* para callbacks (teclado/eventos) → bucle main */</span>
+};</pre>
+
+<div class="step"><b>Paso D — Funciones de pantalla (una por vista).</b> Cada una limpia botones, pinta su contenido y fija <code>m-&gt;pantalla</code>.</div>
+<pre>static void ver_home(struct miapp *m) {
+    gestos_botones_limpiar(m-&gt;g);
+    gestos_pastilla(m-&gt;g, "Mi App");
+    sprintf(m-&gt;texto, "Veces: %d", m-&gt;contador);
+    gestos_nota(m-&gt;g, m-&gt;texto);
+    gestos_boton(m-&gt;g, B_INFO,  "VER INFO", 40, 180, 240, 55, 0x2A6A9A);
+    gestos_boton(m-&gt;g, B_SALIR, "SALIR",    40, 360, 240, 50, 0xB04040);
+    m-&gt;pantalla = P_HOME;
+}
+static void ver_info(struct miapp *m) {
+    gestos_botones_limpiar(m-&gt;g);
+    gestos_pastilla(m-&gt;g, "Info");
+    gestos_nota(m-&gt;g, "Pantalla de detalle");
+    gestos_boton(m-&gt;g, B_VOLVER, "VOLVER", 40, 360, 240, 50, 0x666666);
+    m-&gt;pantalla = P_INFO;
+}</pre>
+
+<div class="step"><b>Paso E — Bucle principal, despacho de eventos y ciclo cooperativo.</b></div>
+<pre>static void bucle(struct miapp *m) {
+    for (;;) {
+        int st = appmgr_get_state(m-&gt;slot);
+        if (st == APP_CLOSING) break;
+        if (st == APP_BACKGROUND) { sleep(100); continue; }
+        if (m-&gt;accion) { m-&gt;accion = 0; /* procesar trabajo pedido por callback */ }
+
+        gev_t ev;
+        if (!gestos_leer(m-&gt;g, &amp;ev)) { sleep(50); continue; }
+
+        if (ev.tipo == GE_ARRASTRE &amp;&amp; ev.dir == GE_ARRIBA) {
+            gestos_show(m-&gt;g, 0);
+            appmgr_set_state(m-&gt;slot, APP_BACKGROUND);
+            continue;
+        }
+        if (ev.tipo != GE_BOTON) continue;
+
+        if (m-&gt;pantalla == P_HOME) {
+            if (ev.id == B_INFO)  { m-&gt;contador++; ver_info(m); }
+            if (ev.id == B_SALIR) break;
+        } else if (m-&gt;pantalla == P_INFO) {
+            if (ev.id == B_VOLVER) ver_home(m);
+        }
+    }
+}</pre>
+<p><i>Nota:</i> si tu app vuelve a frente tras fondo, detecta el cambio de estado a <code>APP_RUNNING</code> y haz <code>gestos_show(m-&gt;g,1)</code>/redibuja (patrón real de las apps).</p>
+
+<div class="step"><b>Paso F — <code>main</code>: crear estado, UI, registrar, ejecutar, limpiar.</b></div>
+<pre>int main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    struct miapp *m = psram_malloc(sizeof(*m));
+    if (!m) exit(1);
+    memset(m, 0, sizeof(*m));
+
+    m-&gt;g = gestos_nueva_partes(GE_PASTILLA|GE_NOTA);
+    if (!m-&gt;g) { psram_free(m); exit(1); }
+    m-&gt;slot = appmgr_register("miapp", "/apps/miapp/app.elf", 0x6688AA, gettid());
+
+    ver_home(m);
+    bucle(m);
+
+    gestos_cerrar(m-&gt;g);
+    appmgr_unregister(m-&gt;slot);
+    psram_free(m);
+    exit(0);
+}</pre>
+
+<div class="step"><b>Paso G — <code>Makefile</code> (patrón medido del SDK).</b> Banderas obligatorias: <code>-fno-pic -ffunction-sections -std=gnu11 -march=rv32imaf_zicsr_zifencei -mabi=ilp32f -mno-relax -msmall-data-limit=0 -Wall</code>, includes del kernel/lvgl/fatfs/plataforma y <code>../lib</code>, enlace con <code>ld -r</code>.</div>
+<pre>TOPDIR = ../../../..
+CC = riscv32-unknown-elf-gcc
+LD = riscv32-unknown-elf-ld
+CFLAGS = -Os -fno-builtin -fno-pic -ffunction-sections -std=gnu11 \
+  -march=rv32imaf_zicsr_zifencei -mabi=ilp32f -mno-relax -msmall-data-limit=0 -Wall \
+  -I$(TOPDIR) -I$(TOPDIR)/include -I$(TOPDIR)/lvgl -I$(TOPDIR)/fatfs \
+  -I$(TOPDIR)/system/platforms/esp32p4 -I../lib
+APP  = miapp
+OBJS = miapp.o ../lib/gestos.o ../lib/start.o
+all: $(APP).elf
+$(APP).elf: $(OBJS)
+	$(LD) -r -o $@ $(OBJS)
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+../lib/gestos.o: ../lib/gestos.c ../lib/gestos.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+../lib/start.o: ../lib/start.S
+	$(CC) $(CFLAGS) -c -o $@ $<
+clean:
+	rm -f miapp.o $(APP).elf
+.PHONY: all clean</pre>
+
+<div class="step"><b>Paso H — Compilar, instalar y probar.</b></div>
+<pre>cd examples/p4-elfsdk/apps/miapp &amp;&amp; make
+<span class="c"># subir a la SD (httpd interno, crea /apps/miapp/)</span>
+curl -X POST "http://192.168.1.107/api/mkdir?path=/apps/miapp"
+curl -X PUT  -T miapp.elf   "http://192.168.1.107/api/file?path=/apps/miapp/app.elf"
+curl -X PUT  -T icon.jpg    "http://192.168.1.107/api/file?path=/apps/miapp/icon.jpg"
+<span class="c"># crear app.txt (o subirlo)</span>
+printf "name=Mi App\nexec=/apps/miapp/app.elf\nicon=S:/apps/miapp/icon.jpg\ncolor=0x6688AA\n" \
+ | curl -X PUT --data-binary @- "http://192.168.1.107/api/file?path=/apps/miapp/app.txt"
+<span class="c"># probar directo por shell:</span>  elf /apps/miapp/app.elf
+<span class="c"># o abrir el launcher y tocar el ícono</span></pre>
+
+<div class="step"><b>Paso I — Checklist antes de dar por buena la app.</b></div>
+<ul>
+<li>Sin variables globales/estáticas mutables (todo en <code>struct miapp</code> en <code>psram_malloc</code>).</li>
+<li><code>appmgr_register</code> con la ruta <b>exacta</b> de <code>exec</code>; <code>appmgr_unregister</code> al salir.</li>
+<li>Obedece <code>APP_CLOSING</code>; gestiona <code>APP_BACKGROUND</code> (<code>gestos_show</code> 0/1). Sin <code>kill()</code> propio forzado.</li>
+<li>Callbacks LVGL: solo señalan (<code>m-&gt;accion</code>), nada de <code>exit</code>/lock/I/O pesado.</li>
+<li><code>gestos_cerrar</code> → <code>appmgr_unregister</code> → <code>psram_free</code> → <code>exit(0)</code> desde <code>main</code>.</li>
+<li>Si usa FAT: respeta no-truncado al sobrescribir (<code>fl_remove</code> antes) y la concurrencia del bus compartido.</li>
+</ul>
+
+</main>
+</body>
+</html>

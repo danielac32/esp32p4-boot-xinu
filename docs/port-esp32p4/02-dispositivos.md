@@ -181,7 +181,7 @@ Riesgos que hay que decir en voz alta:
   FPS. Con frame buffer en RAM el cuello pasa a ser el bus SPI, no el dibujo. Para
   animaciones reales hace falta **LCD_CAM/DMA2D/PPA** (el P4 tiene aceleradores 2D; solo
   existen sus cabeceras HAL, `include/hal/…`, sin driver).
-- El panel lo usa `p4demoTask` (creada desde `system/main.c:91`). Una GUI LVGL sería **una
+- El panel lo usa `p4demoTask` (creada desde `system/main.c:73`). Una GUI LVGL sería **una
   hebra nueva que se adueña del panel**, no un parche del demo.
 
 ---
@@ -203,3 +203,33 @@ deliberadamente **después** de `.audioshare`.
 Montaje y comprobación: `sd` (estado del bloque), `ls`, `df`, `cat`, `format`. La fase R4
 blindó montaje/FAT (`df` lento, `ls`/`cat` de subdirectorios) — está documentado en el
 historial de tareas y verificado en placa.
+
+**Dos defectos de la librería FAT (`fatfs/fat_filelib.c`) que hay que conocer antes de
+escribir en la tarjeta**, ambos encontrados el 2026-11-04 al portar los servidores:
+
+1. **`fl_fopen(path, "w")` NO trunca.**  El modo `w` pone la bandera `FILE_ERASE`
+   (`fatfs/fat_filelib.c:735`, y `:750` para `w+`) y **nadie en el árbol la lee nunca**: ni
+   `_open_file` ni `_create_file` la consultan.  Si el nombre existe, `fl_fopen` cae en la rama
+   "Write Existing" (`fat_filelib.c:791-795`) y devuelve el fichero existente con su `filelength`
+   y su cadena de clusters viejos.  Escribir por
+   encima menos bytes de los que había deja **la cola de los datos anteriores y la talla
+   anterior en el directorio**.  Medido: un `PUT` de 4.096 B y encima uno de 100 B daba
+   `ls -l` = 4.096 antes del arreglo y **100 B exactos** después.  El arreglo es siempre el
+   mismo y está en el árbol: `fl_remove()` del destino **antes** de abrir (en
+   `shell/httpapi.c`, ruta `PUT`, y en `shell/xsh_udpserver.c`, al finalizar la subida de
+   firmware).  Cualquier camino nuevo que sobrescriba necesita la misma disciplina.
+2. **No existe `fl_rename()`.**  El S3 la tenía y su comentario explica que lo que hace es
+   mover la cadena de clusters a otro nombre.  Aquí no está, así que no hay forma de publicar
+   un fichero de forma atómica (`.part` → definitivo): el sustituto es
+   `fl_remove(dest)` → `fs_copy(src,dest)` → **verificar la talla reabriendo el nombre final**
+   → `fl_remove(src)`, todo dentro de un único `fatLibLock()/fatLibUnlock()` (el monitor de la
+   librería es reentrante para el dueño, `system/lock.c`, así que el candado envolvente es
+   correcto aunque cada `fl_*` vuelva a entrar).  Si el corte cae en mitad de la copia, la
+   verificación falla y se borra el destino: nunca queda un fichero parcial con el nombre
+   definitivo, pero **la talla verificada no garantiza el contenido** -- de ahí que el CRC32
+   siga pendiente ([05 §6](05-roadmap-y-conf.md) Pieza 1).
+
+Y el candado que no se ve desde la shell: cada escritura FAT va por el **mismo monitor SDHOST**
+que el WiFi (`sdmmcBusLock()`), así que una subida por UDP y un `ls` grande se serializan.  Es
+lo que pone la punta de latencia que se midió en el ack de un bloque (0,04 s de media, >6 s en
+la peor punta, [03 §7.5](03-red-y-wifi.md#udpserver)).

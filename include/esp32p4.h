@@ -157,7 +157,7 @@
 /* ======================================================================
  * Clock tree and memory map
  * ====================================================================== */
-#define P4_TIMER_FREQ           360000000UL /* CPU root clock == mtime tick */
+#define P4_TIMER_FREQ           400000000UL /* CPLL root clock == mtime tick (SBL clock_init) */
 #define P4_XTAL_FREQ            40000000UL  /* 40 MHz crystal (UART0 sclk)  */
 
 #define P4_L2MEM_BASE           0x4FF00000UL /* internal SRAM used by kernel */

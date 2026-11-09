@@ -42,10 +42,13 @@
  * switching to the newly created thread
  */
 
+/* Contexto: 23 palabras enteras (pc/ra/mstatus/s0-s11/a0-a7) +
+ * 32 registros F (f0-f31) + fcsr = 56 palabras.  Guardar/restaurar FPU evita
+ * corromper decodificadores en float (p. ej. minimp3) al cambiar de hilo. */
 ctxsw:
 	.func ctxsw
 	// reserve space
-	addi sp, sp, -REGBYTES*23
+	addi sp, sp, -REGBYTES*56
 	// save registers
 	STORE_REG a7, REGBYTES*22(sp)
 	STORE_REG a6, REGBYTES*21(sp)
@@ -75,6 +78,41 @@ ctxsw:
 	// created context
 	STORE_REG ra,REGBYTES*1(sp)
 	STORE_REG ra,(sp)
+	// save FPU state (f0-f31 + fcsr)
+	csrr t0, fcsr
+	STORE_REG t0, REGBYTES*55(sp)
+	fsw f0,  REGBYTES*23(sp)
+	fsw f1,  REGBYTES*24(sp)
+	fsw f2,  REGBYTES*25(sp)
+	fsw f3,  REGBYTES*26(sp)
+	fsw f4,  REGBYTES*27(sp)
+	fsw f5,  REGBYTES*28(sp)
+	fsw f6,  REGBYTES*29(sp)
+	fsw f7,  REGBYTES*30(sp)
+	fsw f8,  REGBYTES*31(sp)
+	fsw f9,  REGBYTES*32(sp)
+	fsw f10, REGBYTES*33(sp)
+	fsw f11, REGBYTES*34(sp)
+	fsw f12, REGBYTES*35(sp)
+	fsw f13, REGBYTES*36(sp)
+	fsw f14, REGBYTES*37(sp)
+	fsw f15, REGBYTES*38(sp)
+	fsw f16, REGBYTES*39(sp)
+	fsw f17, REGBYTES*40(sp)
+	fsw f18, REGBYTES*41(sp)
+	fsw f19, REGBYTES*42(sp)
+	fsw f20, REGBYTES*43(sp)
+	fsw f21, REGBYTES*44(sp)
+	fsw f22, REGBYTES*45(sp)
+	fsw f23, REGBYTES*46(sp)
+	fsw f24, REGBYTES*47(sp)
+	fsw f25, REGBYTES*48(sp)
+	fsw f26, REGBYTES*49(sp)
+	fsw f27, REGBYTES*50(sp)
+	fsw f28, REGBYTES*51(sp)
+	fsw f29, REGBYTES*52(sp)
+	fsw f30, REGBYTES*53(sp)
+	fsw f31, REGBYTES*54(sp)
 	//save modified sp at oldthr->stkptr
 	STORE_REG sp, (a0)
 	// get saved sp from newthrd->stkptr
@@ -85,6 +123,42 @@ ctxsw:
 	LOAD_REG ra, REGBYTES*1(sp)
 	// t2 <- saved mstatus
 	LOAD_REG t2, REGBYTES*2(sp)
+
+	// restore FPU state
+	flw f0,  REGBYTES*23(sp)
+	flw f1,  REGBYTES*24(sp)
+	flw f2,  REGBYTES*25(sp)
+	flw f3,  REGBYTES*26(sp)
+	flw f4,  REGBYTES*27(sp)
+	flw f5,  REGBYTES*28(sp)
+	flw f6,  REGBYTES*29(sp)
+	flw f7,  REGBYTES*30(sp)
+	flw f8,  REGBYTES*31(sp)
+	flw f9,  REGBYTES*32(sp)
+	flw f10, REGBYTES*33(sp)
+	flw f11, REGBYTES*34(sp)
+	flw f12, REGBYTES*35(sp)
+	flw f13, REGBYTES*36(sp)
+	flw f14, REGBYTES*37(sp)
+	flw f15, REGBYTES*38(sp)
+	flw f16, REGBYTES*39(sp)
+	flw f17, REGBYTES*40(sp)
+	flw f18, REGBYTES*41(sp)
+	flw f19, REGBYTES*42(sp)
+	flw f20, REGBYTES*43(sp)
+	flw f21, REGBYTES*44(sp)
+	flw f22, REGBYTES*45(sp)
+	flw f23, REGBYTES*46(sp)
+	flw f24, REGBYTES*47(sp)
+	flw f25, REGBYTES*48(sp)
+	flw f26, REGBYTES*49(sp)
+	flw f27, REGBYTES*50(sp)
+	flw f28, REGBYTES*51(sp)
+	flw f29, REGBYTES*52(sp)
+	flw f30, REGBYTES*53(sp)
+	flw f31, REGBYTES*54(sp)
+	LOAD_REG t3, REGBYTES*55(sp)
+	csrw fcsr, t3
 
 	// restore saved registers
 	LOAD_REG s0, REGBYTES*3(sp)
@@ -110,7 +184,7 @@ ctxsw:
 	LOAD_REG a7, REGBYTES*22(sp)
 
 	// restore sp
-	addi sp, sp, REGBYTES*23
+	addi sp, sp, REGBYTES*56
 
 	// check if interrupts are disabled in saved mstatus
 	andi t3, t2, MSTATUS_MIE

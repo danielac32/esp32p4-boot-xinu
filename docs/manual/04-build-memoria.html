@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IV — Build, linker y mapa de memoria | Manual Xinu-P4.2</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}body{margin:0 auto;max-width:1140px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}.mast a:hover{background:var(--accent2);color:#fff}.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule)}h3{font-size:17px;margin:15px 0 4px;color:var(--accent2)}
+p,li{margin:5px 0}ul,ol{margin:5px 0 5px 20px;padding:0}code{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.6px/1.45 var(--mono);white-space:pre-wrap}.c{color:#b7a98e}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}.warn{border-left-color:#b06500}.danger{border-left-color:#8b2e2e}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0;background:var(--hi)}th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.file{font:700 12.5px var(--mono);color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo IV — Build, linker y mapa de memoria</h1></div>
+<main>
+<div class="note"><b>Objetivo.</b> Explicar cómo se compila y flashea el sistema, qué define <code>platformVars</code>/<code>xinu.conf</code>, y cómo el <code>ld.script</code> organiza memoria (XIP, L2MEM, PSRAM, reservas DMA, banda fantasma, heap). <b>Quién lo usa:</b> quien compila/flashea y quien depura memoria/DMA/ELF.</div>
+
+<h2>1. Flujo de compilación</h2>
+<pre>cd /home/daniel/xinu-p4.2/compile
+make ESPTOOL=/home/daniel/esp-idf-py/bin/esptool           <span class="c"># compila kernel</span>
+make ESPTOOL=/home/daniel/esp-idf-py/bin/esptool flashxinu <span class="c"># flashea + hard reset</span>
+make ESPTOOL=... sbl   <span class="c"># SBL (machine/)</span>
+make ESPTOOL=... ulp   <span class="c"># ULP (machine/)</span></pre>
+<ul>
+<li><span class="file">compile/Makefile</span>: <code>PLATFORM=esp32p4</code>, <code>BOOTIMAGE=xinu.boot</code>, <code>TOPDIR=..</code>. Incluye <code>platformVars</code>. CFLAGS base: <code>-Os -Wall -Wstrict-prototypes -nostdinc -fno-builtin -fno-strict-aliasing -fno-common -ffunction-sections -fno-pic -fwrapv -std=gnu11</code>. Enlaza con <code>--static --gc-sections</code>. <b><code>DEPFLAGS</code> vacío</b> → cambios en headers no fuerzan recompilar: tras tocar <code>.h</code> o <code>ld.script</code> usa <code>make clean</code>.</li>
+<li><span class="file">compile/platforms/esp32p4/platformVars</span>: <code>-march=rv32imafc_zicsr_zifencei -mabi=ilp32f -O2 -ffreestanding</code>, <code>-D_XINU_PLATFORM_ESP32P4_ -DTARGET_SOC_ESP32P4</code>, includes (<code>$(TOPDIR)/lvgl</code>, <code>$(TOPDIR)/fatfs -DFATFS_INC_TEST_HOOKS</code>; ojo: <code>include</code> primero → <code>&lt;lvgl.h&gt;</code> del device). <b><code>APPCOMPS</code></b>=<code>shell apps fatfs network mailbox lvgl</code>. <b><code>DEVICES</code></b>=uart/tty, psram, nam, lcd/sdmmc/sdblock/fat, gpio, i2c, touch, power, lvgl, audio, sdio/espeth, raw/udp/tcp/telnet. <b>Sin <code>-lgcc</code>:</b> helpers van a ROM por <code>PROVIDE</code> en <code>ld.script</code> (evita libgcc D/C y fallos medidos); excepción <code>__truncdfsf2</code> en <code>lib/libxc/compiler_rt.c</code>. Construye SBL/ULP vía <code>machine/Makefile</code>.</li>
+<li><b><code>xinu.conf</code> → <code>conf.c/conf.h</code>:</b> generados por el configurador; definen <code>devtab</code>, <code>NDEVS</code>, nombres (<code>SERIAL0,ETH0,AUDIO0,...</code>). No editar <code>conf.c</code>.</li>
+<li><b>Herramientas:</b> <code>esptool</code> (venv), serie <code>/dev/ttyACM0</code> 115200 (un solo proceso). Tras <code>reset</code> el CDC puede requerir resincronizar (<code>esptool ... chip_id</code>). Compilador apps ELF: <code>riscv32-unknown-elf-gcc/ld</code>.</li>
+</ul>
+
+<h2>2. Linker script (<span class="file">compile/platforms/esp32p4/ld.script</span>)</h2>
+<h3>2.1 Regiones</h3>
+<table>
+<tr><th>Región</th><th>ORIGIN</th><th>LENGTH (script)</th><th>Uso</th></tr>
+<tr><td><code>FLASH (rx)</code></td><td>0x40005000</td><td>31M (declarativo; flash física 16 MB)</td><td>XIP: <code>.init/.text/.rodata</code> (<code>ENTRY(_start)</code>).</td></tr>
+<tr><td><code>RAM (rwx)</code></td><td>0x48000000</td><td>32M−32K (tope 0x49FF8000)</td><td>PSRAM cacheada (0x48). Reserva al LP al final (acordado con <code>ulp.ld</code>).</td></tr>
+<tr><td><code>HP_L2MEM (rwx)</code></td><td>0x4FF00000</td><td>768K</td><td>Reserva fantasma, vectores, <code>.data/.bss</code>, pila core1, heap kernel.</td></tr>
+<tr><td><code>LP_SRAM</code></td><td>0x50108000</td><td>32K</td><td>SRAM del LP.</td></tr>
+</table>
+<div class="danger note"><code>FLASH/RAM</code> son declarativos (sobredimensionados). <code>_psram_free_end = ORIGIN(RAM)+LENGTH(RAM)</code>: subir <code>LENGTH(RAM)</code> puede solapar la RAM del ULP.</div>
+
+<h3>2.2 <code>PROVIDE</code> y ROM</h3>
+<p>Bases de periféricos (símbolos tipo <code>SDMMC,CACHE,HP_SYS_CLKRST,GPIO,IO_MUX,UART0</code>), helpers de matriz GPIO ROM, y tabla de rutinas ROM (aritmética/conv/shifts RV32) para evitar <code>-lgcc</code> y fallos con D/C.</p>
+
+<h3>2.3 Secciones y símbolos (lógica)</h3>
+<ul>
+<li><b>Flash:</b> <code>.init</code>, <code>.text</code>, <code>.rodata</code>, ctors, <code>_etext</code>.</li>
+<li><b>PSRAM NOLOAD, alineado 4K</b> (DMA con direcciones 0x48; CPU toca 0x88 directo, sin compartir línea con heap):
+  <ul><li><code>.audioshare</code>: desc/buf TX (4K+8K) + anillo stream (desc 4K + buf 64K) + anillo captura (4K+64K). Evita corrupción medida por cabeceras de heap en la misma línea de caché.</li>
+  <li><code>.sdshare</code>: <code>_sd_desc_page</code> (4K) + <code>_sd_block_page</code> (4K). <code>_psram_free_start = _sd_block_page+4096</code>.</li></ul>
+</li>
+<li><b>L2MEM:</b> <code>.l2reserve</code> (NOLOAD, 128 KB, 0x20000) para la <b>banda fantasma</b> 0x4FF00000–0x4FF1FFFF (no fiable con caché, medido). <code>.vectors</code> (tabla HW CLIC). <code>.data</code> (VMA L2MEM, LMA flash, <code>_data_loadaddr</code>, <code>__global_pointer$</code>). <code>.bss</code>. <code>.core1stk</code> (NOLOAD, 2K, <em>fuera de .bss</em> para preservar testigo). <code>_end</code>.</li>
+<li><b>Heap:</b> <code>_l2mem_free_start=_end</code>, <code>_l2mem_free_end=0x4FFB0000</code> (top 64 KB reservados a ROM). PSRAM libre: <code>[_psram_free_start, _psram_free_end)</code>.</li>
+</ul>
+
+<h2>3. Mapa operativo y coherencia</h2>
+<table>
+<tr><th>Zona</th><th>Uso</th><th>Cuidado</th></tr>
+<tr><td>L2MEM heap (~448 KB)</td><td>Pilas de hilos, <code>memget</code>, tablas/buffers pequeños</td><td>No usar &lt;0x4FF20000 ni top 64 KB; no buffers DMA grandes</td></tr>
+<tr><td>PSRAM (~31.8 MB)</td><td><code>psram_malloc</code>: PCM, imágenes, estado de apps, caches; páginas <code>NOLOAD</code> DMA</td><td>Disciplina 0x48/0x88; no solapar reservas/ULP</td></tr>
+<tr><td>Flash XIP</td><td><code>.text/.rodata</code></td><td>Escritura en runtime requiere driver/plan; sin tabla de particiones</td></tr>
+</table>
+<p><b>Alias 0x48/0x88:</b> misma celda (cacheada/directa). <b>DMA:</b> CPU por 0x88, motor por 0x48, <code>fence rw,rw</code> antes de ceder owner, descriptores en páginas reservadas <code>NOLOAD</code> (patrón <code>.audioshare</code>/AHB-DMA→I2S). <b>ELF:</b> se ejecuta por 0x88 pero requiere <b>wb+inv L1D/L2</b> previo (líneas sucias en 0x48 pueden pisar). L2MEM no tiene alias directo equivalente para DMA.</p>
+
+</main>
+</body>
+</html>

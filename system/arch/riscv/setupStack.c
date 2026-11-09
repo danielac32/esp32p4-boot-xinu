@@ -2,7 +2,8 @@
 #include <riscv.h>
 #include <stdint.h>
 
-#define CONTEXT_WORDS 23
+/* 23 (ra/mstatus/s0-s11/a0-a7 + pc) + 32 F regs (f0-f31) + fcsr = 56 */
+#define CONTEXT_WORDS 56
 #define MAX_REG_ARGS 8
 
 void *setupStack(void *stackaddr, void *procaddr,

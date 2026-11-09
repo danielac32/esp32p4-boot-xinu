@@ -45,6 +45,7 @@
 #include <esp_hosted_sdio.h>
 #include <shell.h>
 #include <timer.h>
+#include <wifinet.h>
 
 /* Tipos del sobre TLV del canal de control (los mismos que usa
  * espHostedCtrl.c al envolver sus peticiones). */
@@ -62,6 +63,18 @@
 /* uid de las peticiones que genera este fichero; alto para no pisar el de la
  * capa de control (que empieza en 1). */
 static uint32 scan_uid = 1000U;
+
+/* wifiSignalRead() esta mas abajo (pide el AP asociado con el 294); aqui solo
+ * hace falta para saber si el NCP ya tiene enlace antes de escanear. */
+int wifiSignalRead(int32 *rssi, uint32 *channel);
+
+/* Colector opcional para wifiScanFill(): si scan_dst no es NULL, cada registro
+ * con SSID se guarda ademas de imprimirse.  El escaneo no es reentrante (hay un
+ * solo C6 y una unica peticion de barrido en vuelo), asi que un puntero global
+ * basta y evita cambiar la firma de todo el camino de impresion. */
+static struct wifi_red *scan_dst = NULL;
+static int scan_cap = 0;
+static int scan_cnt = 0;
 
 /**
  * Varint protobuf (hasta 32 bits) desde buf[*off].  Devuelve false si se acaba
@@ -791,6 +804,36 @@ static void scan_record_print(uint32 idx, const uint8_t *rec, size_t len)
         off += field_len;
     }
 
+    if (scan_dst != NULL && scan_cnt < scan_cap && have_ssid)
+    {
+        int k;
+        int dup = 0;
+
+        /* El mismo SSID puede salir en varios BSSID (repetidores): para la app
+         * sobra con una entrada; el comando `wifi scan` sigue listandolos
+         * todos porque imprime antes de esto. */
+        for (k = 0; k < scan_cnt; k++)
+        {
+            if (0 == strcmp(scan_dst[k].ssid, ssid))
+            {
+                dup = 1;
+                break;
+            }
+        }
+        if (!dup)
+        {
+            struct wifi_red *r = &scan_dst[scan_cnt];
+
+            strncpy(r->ssid, ssid, sizeof(r->ssid) - 1);
+            r->ssid[sizeof(r->ssid) - 1] = '\0';
+            r->canal = (int)channel;
+            r->auth = (int)authmode;
+            r->rssi = (int)rssi;
+            r->hay_rssi = (int)have_rssi;
+            scan_cnt++;
+        }
+    }
+
     if (have_ssid)
     {
         printf(" \"%s\"", ssid);
@@ -866,10 +909,28 @@ shellcmd wifiScanList(void)
 
     (void)esp_hosted_ctrl_init();
 
-    printf("wifi: scan: encendiendo la WiFi del NCP (278/260/280)...\n");
-    (void)esp_hosted_wifi_init_default(3000U);
-    (void)esp_hosted_wifi_set_mode(ESP_HOSTED_WIFI_MODE_STA, 3000U);
-    (void)esp_hosted_wifi_start(3000U);
+    /* Encender la WiFi del NCP (278 init + 260 STA + 280 start) SOLO si aun no
+     * hay enlace.  Medido en placa: con la STA ya asociada, repetir esa
+     * secuencia reinicia la WiFi del C6, tira la conexion (la placa se queda
+     * sin IP y el 286 ya no contesta).  El 294 es el mismo RPC que usa la
+     * barra de estado para leer la senal: contesta el AP asociado cuando lo
+     * hay y 0x300f cuando no. */
+    {
+        int32 rssi = 0;
+        uint32 canal = 0U;
+
+        if (SYSERR == wifiSignalRead(&rssi, &canal))
+        {
+            printf("wifi: scan: encendiendo la WiFi del NCP (278/260/280)...\n");
+            (void)esp_hosted_wifi_init_default(3000U);
+            (void)esp_hosted_wifi_set_mode(ESP_HOSTED_WIFI_MODE_STA, 3000U);
+            (void)esp_hosted_wifi_start(3000U);
+        }
+        else
+        {
+            printf("wifi: scan: el NCP ya tiene enlace; no se reinicia\n");
+        }
+    }
 
     printf("wifi: scan: pidiendo barrido (id=286)...\n");
     if (rpc_call(286U, NULL, 0U, resp, sizeof(resp), 3000U) == 0U)
@@ -919,7 +980,7 @@ shellcmd wifiScanList(void)
             }
             sleep(10U);
             quiet = got ? 0U : quiet + 10U;
-            if (scans != 0U && quiet >= 3000U)
+            if (scans != 0U && quiet >= 1500U)
             {
                 break;
             }
@@ -1037,6 +1098,31 @@ shellcmd wifiScanList(void)
     }
 
     return OK;
+}
+
+/**
+ * Escaneo para las apps (y para el arranque): misma secuencia que `wifi scan`,
+ * pero en vez de solo imprimir deja las redes en `out`.  Devuelve el numero de
+ * SSID distintos encontrados, 0 si no hay ninguna, o SYSERR si el barrido no se
+ * pudo completar.  El comando de consola sigue imprimiendo lo mismo que antes:
+ * la impresion y el llenado ocurren en el mismo recorrido.
+ */
+int wifiScanFill(struct wifi_red *out, int max)
+{
+    int rc;
+
+    if (NULL == out || max <= 0)
+    {
+        return SYSERR;
+    }
+
+    scan_dst = out;
+    scan_cap = max;
+    scan_cnt = 0;
+    rc = wifiScanList();
+    scan_dst = NULL;
+
+    return (OK == rc) ? scan_cnt : SYSERR;
 }
 
 /**

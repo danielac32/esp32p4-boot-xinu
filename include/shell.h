@@ -85,10 +85,11 @@ shellcmd xsh_exit(int, char *[]);
 shellcmd xsh_help(int, char *[]);
 shellcmd xsh_kill(int, char *[]);
 shellcmd xsh_lcd(int, char *[]);
-shellcmd xsh_lvgl(int, char *[]);
+/* xsh_lvgl: la pila grafica java esta aparcada en parked/java-gui/. */
 shellcmd xsh_audio(int, char *[]);
 shellcmd xsh_memdump(int, char *[]);
 shellcmd xsh_mem(int, char *[]);
+shellcmd xsh_psram(int, char *[]);
 shellcmd xsh_ps(int, char *[]);
 shellcmd xsh_stack(int, char *[]);
 shellcmd xsh_svc(int, char *[]);
@@ -133,6 +134,7 @@ shellcmd xsh_sd(int, char *[]);
 shellcmd xsh_wifi(int, char *[]);
 shellcmd xsh_ip(int, char *[]);
 shellcmd xsh_httpd(int, char *[]);
+shellcmd xsh_udpserver(int, char *[]);
 shellcmd xsh_ping(int, char *[]);
 shellcmd xsh_wget(int, char *[]);
 shellcmd xsh_curl(int, char *[]);
@@ -150,8 +152,8 @@ shellcmd xsh_telnet(int, char *[]);
 shellcmd xsh_telnetserver(int, char *[]);
 shellcmd xsh_netboot(int, char *[]);
 shellcmd xsh_test(int, char *[]);
-shellcmd xsh_elfapp(int, char *[]);
 shellcmd xsh_syscheck(int, char *[]);
+/* xsh_java: se va con la JVM aparcada en parked/java-gui/. */
 /* Configuration commands (JSON documents in /config on the FAT volume) */
 
 #endif                          /* _SHELL_H_ */

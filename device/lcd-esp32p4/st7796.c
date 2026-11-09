@@ -16,6 +16,9 @@
 /* Embedded Xinu, Copyright (C) 2026.  All rights reserved. */
 
 #include <clock.h>
+#include <kernel.h>          /* kprintf del banco de pruebas */
+#include <timer.h>           /* millis()                    */
+#include <memory.h>
 #include "lcdhw.h"
 #include "font8x16.h"
 
@@ -435,6 +438,7 @@ void lcdPanelBlit(int x, int y, int w, int h, const uint16_t *img)
         return;
     }
 
+    /* Camino PIO. */
     lcdPinWrite(LCD_DC, true);
     lcdPinWrite(LCD_CS, false);
     for (r = 0; r < hh; r++)
@@ -481,4 +485,63 @@ void lcdPanelDemo(void)
     lcdPanelText("xinu on ESP32-P4", 8, LCD_H - 48, C_GREEN, C_BLACK);
     lcdPanelText("ST7796 320x480 SPI2", 8, LCD_H - 32, C_CYAN, C_BLACK);
     lcdPanelText("baremetal, no ESP-IDF", 8, LCD_H - 16, C_GRAY, C_BLACK);
+}
+
+/**
+ * Medida del camino de pixeles (banco de pruebas del bus).
+ *
+ * Pinta \p iters pantallas completas alternando dos colores: cada pasada
+ * abre ventana, manda CASET/RASET/RAMWR y empuja LCD_W*LCD_H pixeles de 16
+ * bits.  Con eso se mide lo que de verdad importa para la fluidez:
+ *
+ *   - ms/frame  = tiempo de pared de un frame completo.
+ *   - kB/s      = bytes de pixel que salen por el cable cada segundo, que
+ *                 es lo que fija el reloj del SPI (320*480*2 bytes) y lo que
+ *                 sirve para comparar 20, 40 u 80 MHz sin ambiguedad.
+ *
+ * Se mide con millis() y no con micros() porque un frame a 20 MHz pasa de
+ * 100 ms y micros() (32 bits a 360 MHz) da la vuelta cada 11,9 s.
+ *
+ * Devuelve los ms de un frame (0 si el panel no respondio a la ventana).
+ */
+uint32_t lcdPanelSpeed(int iters)
+{
+    uint32_t t0, t1, ms;
+    uint32_t bytes;
+    uint16_t color = C_BLACK;
+    int i;
+
+    if (iters <= 0)
+    {
+        iters = 10;
+    }
+
+    /* Primer frame fuera del cronometro: deja el bus en marcha y descarta
+     * el coste de la primera ventana. */
+    lcdPanelFill(C_BLACK);
+
+    t0 = millis();
+    for (i = 0; i < iters; i++)
+    {
+        color ^= 0xFFFF;
+        lcdPanelFill(color);
+    }
+    t1 = millis();
+
+    ms = t1 - t0;
+    if (ms == 0)
+    {
+        ms = 1;
+    }
+    bytes = (uint32_t)iters * (uint32_t)LCD_W * (uint32_t)LCD_H * 2UL;
+
+    kprintf("lcd: %d frames en %lu ms -> %lu ms/frame, "
+            "%lu kB/s (%lu.%lu MB/s) @ %lu Hz\r\n",
+            iters, (unsigned long)ms, (unsigned long)(ms / (uint32_t)iters),
+            (unsigned long)(bytes / ms),
+            (unsigned long)(bytes / ms / 1000UL),
+            (unsigned long)((bytes / ms) % 1000UL) / 100UL,
+            (unsigned long)lcdSpiClockHz());
+
+    return ms / (uint32_t)iters;
 }

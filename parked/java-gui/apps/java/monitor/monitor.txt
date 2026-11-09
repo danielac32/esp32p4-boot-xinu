@@ -1,0 +1,1 @@
+uso de L2MEM, PSRAM y de la pila

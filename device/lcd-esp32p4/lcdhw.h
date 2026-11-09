@@ -77,11 +77,16 @@ extern struct lcdctl lcdtab[NLCD];
 
 /* Bit clock for the panel bus.  GPSPI2 runs from the 80 MHz PLL
  * (CLK_GATE.mst_clk_sel = 1; that reference clock is on out of reset, see
- * HP_SYS_CLKRST.ref_clk_ctrl1.reg_ref_80m_clk_en) and the divider below is
- * derived from this value, so 20 MHz means div=4.  The ST7796 tolerates far
- * more, but a conservative clock is what brings a panel up; raise it once
- * the timing is proven. */
-#define LCD_SPI_HZ              20000000UL
+ * HP_SYS_CLKRST.ref_clk_ctrl1.reg_ref_80m_clk_en).
+ *
+ * Se pide el maximo del modulo, 80 MHz, que es exactamente lo que usa el
+ * driver del fabricante para esta misma pantalla y estas mismas patas:
+ * examples/arduino/libraries/Waveshare_LCD35/src/lcd35_board.h,
+ * kLcdPixelClockHz = 80000000.  Por encima de 40 MHz el divisor interno del
+ * periferico no llega (minimo div=2), asi que el reloj de bits se toma
+ * directo del modulo con CLOCK.clk_equ_sysclk=1 (ver lcdSpi.c).  A 80 MHz un
+ * frame completo son 30,7 ms de cable; a 20 MHz eran 122,9. */
+#define LCD_SPI_HZ              80000000UL
 
 #define P4_SPI2_CMD             0x00UL
 #define P4_SPI2_CTRL            0x08UL
@@ -89,6 +94,9 @@ extern struct lcdctl lcdtab[NLCD];
 #define P4_SPI2_USER            0x10UL
 #define P4_SPI2_MS_DLEN         0x1CUL
 #define P4_SPI2_MISC            0x20UL
+#define P4_SPI2_DMA_CONF        0x30UL
+#define P4_SPI2_DMA_INT_CLR     0x38UL
+#define P4_SPI2_DMA_INT_RAW     0x3CUL
 #define P4_SPI2_W0              0x98UL    /* W0..W15: 16 words = 64 bytes */
 #define P4_SPI2_CLK_GATE        0xE8UL
 
@@ -113,6 +121,13 @@ extern struct lcdctl lcdtab[NLCD];
 #define P4_SPI_USER_USR_CMD     (1UL << 31)
 #define P4_SPI_DLEN_MASK        0x3FFFFUL     /* ms_data_bitlen[17:0]       */
 #define P4_SPI_MISC_CK_IDLE     (1UL << 29)
+
+#define P4_SPI_DMA_OUTFIFO_EMPTY (1UL << 0)   /* DMA_CONF RO: TX FIFO vacio  */
+#define P4_SPI_DMA_RX_EOF_EN    (1UL << 21)   /* DMA_CONF: modo EOF RX       */
+#define P4_SPI_DMA_TX_ENA       (1UL << 28)   /* DMA_CONF: habilita TX DMA  */
+#define P4_SPI_DMA_AFIFO_RST    (1UL << 31)   /* DMA_CONF: reset TX DMA FIFO (WT) */
+
+#define P4_SPI_DMA_INT_TRANS_DONE (1UL << 12) /* DMA_INT_*: transaccion fin  */
 
 #define P4_SPI_GATE_CLK_EN      (1UL << 0)
 #define P4_SPI_GATE_MST_ACTIVE  (1UL << 1)
@@ -147,6 +162,12 @@ extern struct lcdctl lcdtab[NLCD];
  * @param hz    requested bit clock; rounded down to what the divider can do
  */
 void lcdSpiInit(uint32_t base, uint32_t hz);
+
+/** Cambia el reloj de bits en caliente (hz=0 vuelve a LCD_SPI_HZ). */
+void lcdSpiSetClock(uint32_t hz);
+
+/** Reloj de bits que el periferico aplica de verdad, segun su registro. */
+uint32_t lcdSpiClockHz(void);
 
 /**
  * Push a buffer on the bus, MSB first, in bursts of at most 64 bytes.
@@ -192,5 +213,14 @@ void lcdPanelPixel(int x, int y, uint16_t color);
 void lcdPanelText(const char *s, int x, int y, uint16_t fg, uint16_t bg);
 void lcdPanelBlit(int x, int y, int w, int h, const uint16_t *img);
 void lcdPanelDemo(void);
+
+/**
+ * Medida del camino de pixeles: pinta \p iters pantallas completas y saca por
+ * consola los ms por frame y los kB/s que salen por el cable.  No es un
+ * adorno: separa el coste del SPI (bytes/frame) del coste del CPU (empaquetar
+ * y hacer byte-swap), que es lo que hay que saber antes de tocar el reloj o
+ * de meter DMA.  Devuelve los ms que costo un frame (0 si no pudo dibujar).
+ */
+uint32_t lcdPanelSpeed(int iters);
 
 #endif                          /* _LCDHW_H_ */

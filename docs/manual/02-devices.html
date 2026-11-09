@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>II — Drivers de dispositivos (detalle y código) | Manual Xinu-P4.2</title>
+<style>
+:root{--paper:#f4ecd8;--paper2:#efe4c8;--ink:#2b2118;--muted:#6b5a46;--rule:#c4b08a;--accent:#7a3e1d;--accent2:#1f4e5f;--stamp:#8b2e2e;--hi:#fff8e6;--mono:"Courier New",Courier,ui-monospace,monospace;--serif:Georgia,"Times New Roman",Times,serif}
+*{box-sizing:border-box}html{background:#d8ccb4}
+body{margin:0 auto;max-width:1160px;background:var(--paper);color:var(--ink);font:15.5px/1.68 var(--serif);padding:0 0 28px}
+.mast{padding:14px 22px;border-bottom:2px solid var(--rule);background:linear-gradient(180deg,var(--hi),var(--paper));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.mast a{font:700 13px var(--mono);color:var(--accent2);border:1px solid var(--accent2);padding:4px 9px;text-decoration:none;background:#f8f3e6}
+.mast a:hover{background:var(--accent2);color:#fff}.mast h1{margin:0;font-size:24px}
+main{padding:16px 22px}
+h2{font-size:22px;margin:22px 0 6px;color:var(--accent);border-bottom:1px solid var(--rule)}
+h3{font-size:17px;margin:15px 0 4px;color:var(--accent2)}
+h4{font:700 13.5px var(--mono);margin:11px 0 3px;color:var(--stamp)}
+p,li{margin:5px 0} ul,ol{margin:5px 0 5px 20px;padding:0}
+code{font-family:var(--mono);font-size:.93em;background:#efe6d2;padding:1px 4px;border:1px solid #dccfaa}
+pre{background:#2a2118;color:#f3ead6;border:1px solid #5a4632;padding:11px 13px;overflow:auto;font:12.6px/1.45 var(--mono);white-space:pre-wrap}
+pre .c{color:#b7a98e}
+.note{border:1px solid var(--rule);border-left:6px solid var(--accent2);background:var(--hi);padding:10px 13px;margin:10px 0}
+.warn{border-left-color:#b06500}.danger{border-left-color:var(--stamp)}
+table{width:100%;border-collapse:collapse;font-size:13.8px;margin:8px 0;background:var(--hi)}
+th,td{padding:6px 8px;border:1px solid var(--rule);vertical-align:top;text-align:left}
+th{background:var(--paper2);font:700 12px var(--mono);text-transform:uppercase;color:var(--muted)}
+.file{font:700 12.5px var(--mono);color:var(--accent)}
+.sig{font:12.5px var(--mono);color:#1a3a44;background:#e8efe8;border:1px solid #b9ccb9;padding:5px 8px;display:block;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="mast"><a href="../index.html">← Índice</a><h1>Capítulo II — Drivers de dispositivos (detalle y código)</h1></div>
+<main>
+
+<div class="note"><b>Objetivo.</b> Explicar cada driver del port: ficheros, estructura, secuencia de <code>init</code>, operaciones (<code>open/close/read/write/getc/putc/seek/control</code>, ISR), comportamiento del código y <b>quién lo invoca</b>. Todo el acceso pasa por el modelo de dispositivos de Xinu (<code>devtab</code>).</div>
+
+<h2>1. Modelo de dispositivo y despacho</h2>
+<h3>1.1 Configuración y tabla (<code>xinu.conf</code> → <code>conf.c/conf.h</code>)</h3>
+<p><span class="file">compile/platforms/esp32p4/xinu.conf</span> declara tipos (p. ej. <code>null</code>, <code>uart</code> HARDWARE con <code>-intr</code>, <code>tty</code> SOFTWARE, <code>gpio</code>, <code>i2c</code>, <code>lcd</code> con <code>csr=SPI2_BASE</code>, <code>sdmmc</code>/<code>sdblock</code>/<code>fat</code>, <code>audio</code>, <code>espeth</code>, <code>raw/udp/tcp/telnet</code>, <code>lvgl</code>…) e instancias nombradas (<code>SERIAL0 is uart</code>, <code>CONSOLE is tty on SERIAL0</code>, <code>ETH0 is espeth</code>, <code>AUDIO0</code>, <code>GPIO0</code>, <code>I2C0</code>, <code>LCD0</code>, <code>TOUCH0</code>, <code>POWER0</code>, <code>SDMMC0/SD0/FAT0</code>, <code>TCP0-7</code>…). El configurador genera <code>system/conf.c</code> y <code>include/conf.h</code> con <code>devtab[NDEVS]</code>, <code>NDEVS</code> y los <code>#define</code> de índices. <b>No se edita <code>conf.c</code> a mano.</b> El <b>orden</b> importa (p. ej. LCD/TOUCH antes de LVGL; SDMMC0 antes de SD0 antes de FAT0).</p>
+
+<h3>1.2 Despacho uniforme (ej. <code>system/read.c</code>, <code>open.c</code>, <code>control.c</code>)</h3>
+<pre>devcall read(int descrp, void *buffer, uint count) {
+    if (isbaddev(descrp)) return SYSERR;
+    device *devptr = &devtab[descrp];
+    return ((*devptr->read)(devptr, buffer, count));
+}</pre>
+<p>El mismo patrón aplica a <code>open/close/write/getc/putc/seek/control</code> (con <code>va_list</code> en <code>open</code>). <code>ioerr</code>/<code>ionull</code> son stubs por defecto. <b>Quién llama:</b> shell (<code>xsh_*</code>), kernel (<code>sysinit</code> invoca <code>init</code>; red/servicios), port LVGL (<code>LCD_CTRL_BLIT</code>, lectura touch), servidores, y apps ELF (vía exports <code>open/read/write/control</code>).</p>
+
+<h2>2. Consola: UART + TTY</h2>
+<h3><span class="file">device/uart/</span> y <span class="file">device/uart-esp32p4/</span> (SERIAL0, <code>UART0_BASE</code>, <code>UART0_IRQn</code>)</h3>
+<p><b>Rol.</b> Consola serie a 115200 (USB-CDC en la placa aparece como <code>/dev/ttyACM0</code> en el host). <code>uartInit</code> programa el periférico UART0 del ESP32-P4 (baudios, formato, FIFOs) y registra la ISR (<code>uartInterrupt</code>, <code>-intr</code> en conf). <code>uartRead/Write/Getc/Putc/Control</code> mueven bytes; la ISR atiende RX/TX según buffers/interrupciones del driver.</p>
+<p><b>TTY (<code>device/tty</code>, CONSOLE = tty sobre SERIAL0).</b> Capa “cocinada” sobre la UART: <code>ttyInit/Open/Close/Read/Write/Getc/Putc/Control</code> implementan edición de línea/eco/modos (dependiendo de la configuración clásica de Xinu). <code>thrtab</code> inicia fds 0/1/2 en <code>CONSOLE</code>.</p>
+<p><b>Quién llama.</b> <code>sysinit</code> inicializa; <code>kprintf/printf</code> y toda la shell/telnet escriben/leen por consola; <code>uartstat</code> consulta estado. ISR disparada por hardware (<code>UART0_IRQn</code> vía CLIC).</p>
+
+<h2>3. GPIO (<span class="file">device/gpio/</span>, GPIO0)</h2>
+<p><b>Ficheros.</b> <code>gpioInit.c</code>, <code>gpio.c</code> (primitivas: <code>gpio_set_dir</code>, <code>gpio_set_pull</code>, <code>gpio_set_open_drain</code>, <code>gpio_write</code>, <code>gpio_read</code>, <code>gpio_toggle</code>, acceso a matriz IO_MUX/GPIO), <code>gpioControl.c</code>.</p>
+<p><b><code>gpioControl(devptr, func, arg1=pin, arg2)</code></b> (código real): <code>switch(func)</code> despacha a <code>GPIO_CTRL_SET_DIR/SET_PULL/SET_OPEN_DRAIN/WRITE/READ/TOGGLE</code> → llama la primitiva correspondiente con <code>(uint8_t)arg1</code> y retorna <code>OK</code> (o el nivel en <code>READ</code>), <code>SYSERR</code> si comando desconocido. No toma lock global aquí (operaciones por pin vía registros); el uso concurrente lo coordina quien comparta pines.</p>
+<p><b>Quién llama.</b> <code>xsh_gpio</code>; drivers internos que manejan pines (backlight LCD, enable de amplificador audio GPIO53 con secuencia anti-pop, líneas SD/WiFi según plataforma).</p>
+
+<h2>4. I2C (<span class="file">device/i2c/</span>, I2C0) — bus compartido</h2>
+<p><b>Ficheros.</b> <code>i2cInit.c</code> (configura controlador maestro, crea <code>i2cmon</code>), <code>i2c.c</code> (transacciones CMD/reg: <code>i2c_probe</code>, <code>i2c_write/read</code>, <code>i2c_write_reg8</code>, <code>i2c_read_regs</code>, variantes reg16), <code>i2cRead.c</code>, <code>i2cControl.c</code>.</p>
+<p><b><code>i2cControl</code> (código real):</b> <code>dev=arg1</code> (dirección 7-bit), <code>req=arg2</code> (<code>struct i2c_req*</code> con <code>buf/len/reg</code>). <b>Es el único punto que toma el monitor del bus</b> (<code>lock(i2cmon)</code> … <code>unlock(i2cmon)</code>) para que ningún dispositivo en el bus olvide soltarlo. <code>switch</code> por <code>I2C_CTRL_PROBE/WRITE/READ/WRITE_REG8/READ_REGS/WRITE_REG16/READ_REGS16</code> invoca la primitiva y devuelve <code>OK/SYSERR</code>.</p>
+<p><b>Uso.</b> Bus compartido: touch FT6336U (0x38), códec ES8311 (0x18), PMIC AXP2101 (0x34). <b>Quién llama.</b> Drivers <code>touch</code>, <code>audio</code> (config del ES8311), <code>power</code>; <code>xsh_i2c</code> (<code>scan</code>/pruebas). <b>Importante:</b> el monitor serializa transacciones entre consumidores concurrentes.</p>
+
+<h2>5. Touch (<span class="file">device/touch/</span>, TOUCH0)</h2>
+<p><b>Ficheros.</b> <code>touchInit.c</code> (detecta/configura FT6336U o GT911 sobre I2C, segun soporte), <code>touchRead.c</code>, <code>touchControl.c</code>, lógica de lectura de puntos.</p>
+<p><b><code>touchRead</code> (código real):</b> interpreta <code>buf</code> como arreglo de <code>touch_point_t</code> y <code>nitems</code> como capacidad (no bytes); valida y retorna <code>touch_read(...)</code> = nº de puntos (0 sin dedo) o <code>SYSERR</code>. Poleado (TP_INT cableado pero sin usar IRQ). <b><code>control(TOUCH_CTRL_READ,...)</code></b> es la vía usada por LVGL.</p>
+<p><b>Quién llama.</b> <code>lvgl_touch_cb</code> en <code>lvglport.c</code> (en la hebra <code>lvglui</code>, cada ciclo de handler) para alimentar el input de LVGL; <code>xsh_touchpanel</code> para pruebas.</p>
+
+<h2>6. Power / PMIC (<span class="file">device/power/</span>, POWER0, AXP2101)</h2>
+<p><b>Ficheros.</b> <code>powerInit.c</code>, <code>power.c</code>, <code>powerControl.c</code>. Habla por I2C (0x34) con el AXP2101.</p>
+<p><b>Operación.</b> <code>control(POWER0, ...)</code> expone lecturas: estado de batería, tensión, carga, etc. <b>Política crítica (solo lectura):</b> no escribir registros que gobiernan rails/reset (p. ej. 0x10, 0x80 en el árbol de notas) — puede apagar o tumbar la placa. Los drivers/ajustes respetan esto.</p>
+<p><b>Quién llama.</b> <code>xsh_power</code>; app <code>settings</code> (botón de apagado/política según implementación, siempre con cautela de solo lectura donde aplique).</p>
+
+<h2>7. LCD ST7796 por SPI2 (<span class="file">device/lcd-esp32p4/</span>, LCD0, <code>csr=SPI2_BASE</code>)</h2>
+<p><b>Ficheros.</b> <code>lcdInit.c</code>, <code>lcdControl.c</code>, <code>lcdSpi.c</code> (maestro GPSPI2: init, ráfagas PIO por <code>W0..W15</code>/polling <code>CMD_USR</code>, <code>lcdSpiWriteDma</code> experimental), <code>lcdDma.c</code> (AXI-GDMA 0x5008A000, OUT ch0, <code>peri_out_sel=gpspi_2</code>=1 — no estabilizado), <code>st7796.c</code> (<code>lcdPanelInit/Fill/FillRect/Pixel/Text/Blit/Orient/Backlight/Demo/Speed</code>), <code>lcdGpio.c</code>, <code>lcdhw.h</code>.</p>
+<p><b><code>lcdInit</code> (código real):</b> toma <code>lcdtab[minor]</code>, crea <code>lock=moncreate()</code> (serializa dibujo: ventana+pixeles no deben intercalarse entre hilos), <code>up=FALSE</code>, <code>rot</code> por defecto; <code>lcdSpiInit(csr, LCD_SPI_HZ)</code>; <code>lcdPanelInit()</code> (secuencia ST7796); si ok marca <code>up=TRUE</code> y loguea “ST7796 WxH rot @ Hz”. El panel es display de arranque (sin mirroring vivo de log; <code>LCD_CTRL_SYNC</code> pinta el grid una vez).</p>
+<p><b><code>lcdControl</code> (código real):</b> valida <code>up</code>, toma <code>lock</code>. <code>switch</code>: <code>BACKLIGHT</code>, <code>FILL(color)</code>, <code>RECT(pixel_rect)</code>, <code>PIXEL</code>, <code>TEXT(lcd_text)</code>, <code>BLIT(lcd_blit{x,y,w,h,img RGB565})</code> → llaman <code>lcdPanel*</code>; <code>DEMO</code>, <code>ORIENT</code> (actualiza <code>rot</code>), <code>SPEED</code>/<code>CLOCK</code> (banco de pruebas, <code>lcdSpiSetClock</code>). Valida punteros nulos en structs. Suelta lock y retorna <code>OK/SYSERR</code>.</p>
+<p><b>Camino de datos.</b> 320×480 RGB565. El flush de LVGL llama <code>control(LCD0, LCD_CTRL_BLIT, &b, 0)</code> con <code>b.img</code> apuntando al buffer de LVGL en PSRAM (sin copia intermedia). PIO: ráfagas 64 B, polling. DMA SPI2 (AXI-GDMA, no AHB) probado sin estabilizar → permanece PIO.</p>
+<p><b>Quién llama.</b> <code>lvglport</code> (flush, en <code>lvglui</code> bajo flujo del port), <code>xsh_lcd</code>, demo de arranque. El lock del device evita carreras con <code>lvglui</code> o pruebas concurrentes.</p>
+
+<h2>8. Almacenamiento: SDMMC → sdblock → FAT</h2>
+<h3><span class="file">device/sdmmc-esp32p4/</span> (SDMMC0)</h3>
+<p>Driver del controlador SDMMC del P4. Maneja relojes/pads/comandos/datos/IDMAC (DMA del host SD) para los slots: <b>slot 0 = microSD</b>, <b>slot 1 = ESP32-C6</b> (WiFi por SDIO). Comparte el bus → <b><code>sdmmcBusInit/Lock/Unlock</code></b> (<code>system/sdmmcbus.c</code>, monitor reentrante) serializa transacciones. Los descriptores/buffers de DMA del SD siguen la disciplina de páginas PSRAM reservadas (<code>.sdshare</code> en <code>ld.script</code>) y ventanas 0x88/0x48 donde aplica.</p>
+<h3><span class="file">device/sdblock-esp32p4/</span> (SD0)</h3>
+<p>Presenta la tarjeta como dispositivo de bloques (512 B): protocolo SD (init, read/write sectores, seek/control) sobre SDMMC0. Consumido por la capa FAT.</p>
+<h3><span class="file">device/fat/</span> + <code>fatfs/</code> (FAT0)</h3>
+<p><code>fatInit</code> inicializa y, si hay medio, adjunta/monta el volumen FAT (FatFs/filelib). Expone control del dispositivo; la API de ficheros se usa como <code>fl_*</code> (<code>fl_open/read/write/seek/opendir/readdir/remove/mkdir...</code>) con un monitor interno reentrante (<code>fatmon</code>/<code>fl_attach_locks</code>) que serializa llamadas. <b>Trampas:</b> no trunca al sobrescribir con menos bytes → <code>fl_remove</code> antes de sustituir; no hay <code>fl_rename</code>. <code>lvglfs</code> monta la letra <code>S:</code> sobre esto para LVGL.</p>
+<p><b>Quién llama.</b> <code>sysinit</code> (init de devtab); shell (<code>ls/cat/cp/...</code>, <code>elf</code> lee el ELF), <code>httpd</code>/API, <code>elfload</code>, apps (<code>musica</code>, <code>settings</code> lee/escribe <code>/wifi.txt</code>), LVGL (<code>S:</code>).</p>
+
+<h2>9. Audio (<span class="file">device/audio/</span>, AUDIO0 — ES8311 + I2S0 + AHB-DMA)</h2>
+<p><b>Ficheros.</b> <code>audioInit.c</code>, <code>audioControl.c</code>, <code>audioIn.c</code>/<code>audioOut.c</code>/<code>audioOps.c</code> (read/write/ops), <code>es8311.c</code> (códec por I2C: vol, mute, ganancia ADC/PGA, init), <code>i2s.c</code> (I2S0, relojes MCLK/BCLK/LRCK via <code>HP_SYS_CLKRST</code>/<code>LP_AON_CLKRST</code>, formato 48 kHz 16-bit 2 slots, 192000 B/s), <code>ahbdma.c</code> (AHB GDMA 0x50085000, <code>PERI_SEL</code> I2S0=3, descriptores enlazados cíclicos en <code>.audioshare</code> PSRAM, CPU 0x88 / motor 0x48, <code>fence</code>).</p>
+<p><b>Funcionamiento.</b> I2S no expone FIFO CPU para llenado directo → el DMA mueve TX/RX entre anillos en PSRAM (<code>.audioshare</code>: páginas de descriptores + buffers de stream/captura, fijas, sin compartir línea de caché con el heap). <code>write()</code> encola PCM para reproducción; <code>read()</code> entrega captura disponible. <code>control()</code> ajusta volumen/mute/ganancia/rutas. Amplificador GPIO53 (NS4150B) con secuencia anti-pop (datos/enlace/silencio antes de habilitar; inverso al parar). Quirk de mono/slots según placa.</p>
+<p><b>Quién llama.</b> <code>xsh_audio</code> (play wav, rec, loop, tonos, control); <code>mp3.c</code>/export <code>mp3_*</code> decodifican MP3 y alimentan <code>AUDIO0</code> (app <code>musica</code>, hilos cooperativos). El reloj total (mclk/bclk/lrck/bitclk) debe ser coherente.</p>
+
+<h2>10. LVGL (device/port, LVGL0)</h2>
+<p><b>Ficheros.</b> <code>lvglport.c</code> (flush→<code>LCD_CTRL_BLIT</code>, input→<code>TOUCH_CTRL_READ</code>, <code>lvgl_lock/unlock</code> sobre <code>lvglmon</code>, hebra <code>lvglui</code> con <code>lv_tick_inc</code>+<code>lv_timer_handler</code> cada 5 ms, buffers PSRAM, <code>lvgl_shadow</code>, idle/backlight, <code>lvglShotBmp</code>), <code>lvglfs.c</code> (FS <code>S:</code> sobre FAT), <code>include/lvgl.h</code> (controls <code>LVGL_CTRL_*</code>).</p>
+<p><b>Código clave.</b> <code>lvgl_lock()/unlock()</code> envuelven <code>lock/unlock(lvglmon)</code>. El flush copia el área al <code>shadow</code> y hace BLIT (omitiendo si pantalla apagada). El callback de touch despierta/política de “tragar” toque al despertar y entrega <code>PRESSED/RELEASED</code>. <code>lvglInit</code> prepara LVGL, registra display/input/FS y lanza <code>lvglui</code>.</p>
+<p><b>Quién llama.</b> <code>lvglui</code> (kernel thread) bombea; apps/shell/JVM glue llaman API LVGL <em>bajo lock</em> (apps ELF vía exports, ver Cap. X). <code>LVGL_CTRL_IDLE</code> ajusta apagado por inactividad.</p>
+
+<h2>11. Red: SDIO/esp_hosted, espeth y sockets</h2>
+<h3><span class="file">device/sdio-esp32p4/</span> + esp_hosted</h3>
+<p>Transporte SDIO con el ESP32-C6 (slot 1, bus compartido). El código de control/transporte (esp_hosted) implementa RPC TLV/protobuf (init, MAC, scan, join, signal, eventos) y paso de tramas. Se serializa con <code>sdmmcBusLock</code> y se protege el camino RPC ante la hebra de recepción (evitando que se “coma” respuestas; raw RPC/anillo según integración). <b>Quién llama.</b> <code>xsh_wifi</code>, <code>netboot</code>/arranque de red, API <code>wifinet</code> exportada a apps.</p>
+
+<h3><span class="file">device/espeth-esp32p4/</span> (ETH0)</h3>
+<p><code>espethInit/Open/Close/Read/Write/Control</code>. Presenta WiFi del C6 como interfaz tipo Ethernet: <code>Read</code> entrega tramas recibidas (del anillo/hosted), <code>Write</code> envía tramas, <code>Control</code> maneja LINK/MAC/stats. Base de <code>netif</code> para la pila nativa. <b>Quién llama.</b> Pila de red (RX/TX de tramas) y <code>ifconfig</code>/diagnóstico.</p>
+
+<h3><span class="file">device/raw, udp, tcp, telnet</span> (RAW0-1, UDP0-1, TCP0-7, TELNET*)</h3>
+<p>Dispositivos de socket sobre las tablas de la pila (<code>rawtab/udptab/tcptab</code>). <code>open/read/write/control/close</code> crean/usan PCBs: TCP soporta pasivo/activo, timeouts (<code>TCP_CTRL_RCVTIMEO</code>), estados; UDP/RAW demux por protocolo/puerto. <code>telnet</code> añade capa cocinada (eco, NVT/IAC, CRLF) sobre un TCP. <b>Quién llama.</b> <code>httpd</code>, <code>telnetd</code>, <code>udpserver</code>, <code>ping/dns</code> y servicios; apps si usan sockets exportados.</p>
+
+<h2>12. NAMESPACE y PSRAM (device)</h2>
+<p><b><code>device/nam</code>:</b> <code>naminit/map/open/mount</code> resuelven <code>/dev/&lt;nombre&gt;</code> a descriptores. <b><code>device/psram</code>:</b> <code>psramInit</code> expone la memoria externa (mapeada por SBL); el allocator <code>psram_*</code> vive en <code>system/psrammem.c</code> y lo usan kernel/LVGL/audio/apps.</p>
+
+<div class="note"><b>Patrón transversal de todos los drivers.</b> (1) <code>init</code> llamado por <code>sysinit</code> según <code>devtab</code>; (2) estado por instancia en <code>xxxTab[minor]</code> (locks, flags <code>up</code>, buffers); (3) operaciones vía <code>control/read/write</code> despachadas por el núcleo; (4) buses compartidos (I2C, SDMMC) protegidos por monitor; (5) los invocadores son shell, subsistemas del kernel (red/LVGL/ELF), servidores y apps ELF.</div>
+
+</main>
+</body>
+</html>

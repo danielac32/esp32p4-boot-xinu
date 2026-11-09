@@ -1,9 +1,11 @@
 # 7 · Organización de la flash (diseño, no aplicado)
 
-> **Estado: SOLO DISEÑO.** Este documento no cambia nada: ni `ld.script`, ni `ulp.ld`,
-> ni las reglas `flash`/`flashxinu`, ni el SBL. Describe el mapa propuesto, las
-> restricciones que lo fijan, el bootloader de segunda etapa (`bl2`) que se añade **después
-> del SBL**, y el encogimiento de la ULP a **64 KB de flash y 20 KB de RAM** que se pidió.
+> **Estado: SOLO DISEÑO, con una excepción ya aplicada.** Este documento no cambia
+> `ld.script`, ni las reglas `flash`/`flashxinu`, ni el SBL. Describe el mapa propuesto, las
+> restricciones que lo fijan y el bootloader de segunda etapa (`bl2`) que se añadiría **después
+> del SBL**. Lo único que ya está en el árbol, autorizado el 2026-11-04 ("modifica ulp para que
+> use solo 64k de flash y 32k de ram"), es el encogimiento de la ULP: `FLASH LENGTH = 64K` y
+> `RAM LENGTH = 32K` en [machine/ulp/ulp.ld:48-49](../../machine/ulp/ulp.ld) — ver §3.1.
 > Cada afirmación de "hoy" va con su `fichero:línea` y su cifra medida el 2026-11-04 en el
 > árbol de `compile/` y `machine/build/`.
 
@@ -28,17 +30,19 @@ Tres huecos y cuatro verdades incómodas:
 - **No hay tabla de particiones en ningún sitio** ([01-memoria-nucleos.md:63](01-memoria-nucleos.md),
   `:90`); se escribe a tres direcciones fijas ([platformVars:167-171](../../compile/platforms/esp32p4/platformVars)).
 - Entre el final del kernel (`0x4DD00`) y la ULP (`0x100000`) quedan **729.364 B (~712 KB) sin
-  proteger**: `FLASH LENGTH = 31M` ([ld.script:26](../../compile/platforms/esp32p4/ld.script)) no corta
+  proteger**: `FLASH LENGTH = 31M` ([ld.script:28](../../compile/platforms/esp32p4/ld.script)) no corta
   contra los 16 MB reales, así que `ld` deja crecer al kernel hasta pisar la ULP en silencio.
 - **El port no sabe escribir su flash.** No hay driver de programa/borrado en `device/` ni en
   `system/` (solo definiciones de registro en `machine/sbl/esp32p4.h` y la API ROM
   `SPI_FLASH_MMAP_INVALIDATE_CACHE_ADDR`, [include/esp32p4/rom/cache.h:1595](../../include/esp32p4/rom/cache.h)).
   Quien escribe la flash hoy es `esptool` por USB. Esto es el trabajo gordo del OTA, no el mapa.
-- La RAM de la ULP **no está en LP_SRAM**: está en el último megabyte de PSRAM
-  (`RAM ORIGIN = 0x49F00000, LENGTH = 1M`, [machine/ulp/ulp.ld:42](../../machine/ulp/ulp.ld)), y el
-  kernel cierra justo ahí con `RAM LENGTH = 31M` ([ld.script:27](../../compile/platforms/esp32p4/ld.script),
-  `_psram_free_end` en `:245`). `LP_SRAM (0x50108000, 32K)` está declarada y **sin usar**
-  ([ld.script:29](../../compile/platforms/esp32p4/ld.script)).
+- La RAM de la ULP **no está en LP_SRAM**: está al final del PSRAM, `0x49FF8000..0x4A000000`
+  (`RAM ORIGIN = 0x49FF8000, LENGTH = 32K`, [machine/ulp/ulp.ld:49](../../machine/ulp/ulp.ld)),
+  y el kernel ocupa todo lo anterior: `RAM LENGTH = 32M-32K`
+  ([ld.script:33](../../compile/platforms/esp32p4/ld.script)) da
+  `_psram_free_end = ORIGIN(RAM)+LENGTH(RAM) = 0x49FF8000`, o sea que las dos piezas encajan justo.
+  `LP_SRAM (0x50108000, 32K)` sigue declarada y **sin usar**
+  ([ld.script:35](../../compile/platforms/esp32p4/ld.script)).
 
 ---
 
@@ -49,10 +53,10 @@ Tres huecos y cuatro verdades incómodas:
 | R1 | La BootROM solo mira `0x2000` y exige cabecera ESP con magic `0xE9`; copia el SBL a HP_TCM `0x30100000` (**8 KB**) y lo ejecuta ahí. | [machine/sbl/SBL.ld:19](../../machine/sbl/SBL.ld), [machine/Makefile:78-84](../../machine/Makefile), [01-memoria-nucleos.md:11-26](01-memoria-nucleos.md) |
 | R2 | El SBL salta a `__kernel_entry_point = 0x40005000`, dirección **literal**. Cualquier cosa que vaya entre el SBL y el kernel tiene que ocupar exactamente el offset `0x5000`. | [SBL.ld:28](../../machine/sbl/SBL.ld), `machine/sbl/boot.S:63-66` |
 | R3 | El SBL carga `__ulp_entry_point = 0x40100000` en `ULP_ENTRY_POINT_REG (0x50110028)`. Mover la ULP de `0x100000` cuesta editar `SBL.ld` **y** `ulp.ld` y re-flashear el SBL. | [SBL.ld:33](../../machine/sbl/SBL.ld), [machine/sbl/ulp_boot.c:33-64](../../machine/sbl/ulp_boot.c) |
-| R4 | El kernel es XIP con **VMA == LMA** ([01-memoria-nucleos.md:41-43](01-memoria-nucleos.md)). Una ranura de app **es** su dirección de enlace: A/B obliga a enlazar dos veces el mismo objeto. | [ld.script:26](../../compile/platforms/esp32p4/ld.script) |
-| R5 | `.data` vive en flash (`AT>FLASH`) y `start.S` la copia a L2MEM; los primeros **128 KB de L2MEM no tienen celdas** (banda fantasma, corte real en `0x4FF20000`). Cualquier código que se ejecute durante una escritura de flash tiene que ir a `≥ 0x4FF20000`, no a la ventana vieja. | [ld.script:160-203](../../compile/platforms/esp32p4/ld.script), [06-syscheck.md:233](06-syscheck.md) |
+| R4 | El kernel es XIP con **VMA == LMA** ([01-memoria-nucleos.md:41-43](01-memoria-nucleos.md)). Una ranura de app **es** su dirección de enlace: A/B obliga a enlazar dos veces el mismo objeto. | [ld.script:28](../../compile/platforms/esp32p4/ld.script) |
+| R5 | `.data` vive en flash (`AT>FLASH`) y `start.S` la copia a L2MEM; los primeros **128 KB de L2MEM no tienen celdas** (banda fantasma, corte real en `0x4FF20000`). Cualquier código que se ejecute durante una escritura de flash tiene que ir a `≥ 0x4FF20000`, no a la ventana vieja. | [ld.script:166-209](../../compile/platforms/esp32p4/ld.script), [06-syscheck.md:233](06-syscheck.md) |
 | R6 | El MMU del SBL mapea la flash en **páginas de 64 KB** (512 entradas, [machine/sbl/mmu.c:25-51](../../machine/sbl/mmu.c)); el borrado mínimo es de sector **4 KB**. | ⇒ particiones alineadas a 64 KB salvo el bloque fijo `0x2000..0x7FFF`, que manda la R1/R2 |
-| R7 | Topes del heap L2 ya fijados: `memheap = _end + PANICSTK + NULLSTK`, y `_l2mem_free_end = 0x4FFB0000` porque los últimos 64 KB son ROM. | [loader/platforms/esp32p4/start.S:143-152](../../loader/platforms/esp32p4/start.S), [ld.script:233-241](../../compile/platforms/esp32p4/ld.script) |
+| R7 | Topes del heap L2 ya fijados: `memheap = _end + PANICSTK + NULLSTK`, y `_l2mem_free_end = 0x4FFB0000` porque los últimos 64 KB son ROM. | [loader/platforms/esp32p4/start.S:143-152](../../loader/platforms/esp32p4/start.S), [ld.script:239-247](../../compile/platforms/esp32p4/ld.script) |
 
 ---
 
@@ -82,9 +86,9 @@ Decisiones que lleva puestas:
   tocar el SBL para añadir el bootloader: el salto de `0x40005000` pasa a caer en `bl2` en vez
   de caer en el kernel, y `bl2` decide dónde va el kernel.
 - **La ULP se queda en `0x100000`** con **64 KB** exactos (un bloque de borrado, 88 veces los
-  724 B que usa hoy). Así se respeta R3: ningún cambio en el SBL. Su `ulp.ld:41`
-  `FLASH LENGTH = 1M` pasa a `64K`, que además **corta de verdad**: hoy puede crecer 1 MB por
-  encima de su partición y pisar `app-b` sin que `ld` avise.
+  724 B que usa hoy). Así se respeta R3: ningún cambio en el SBL. **Esto ya está aplicado**
+  (`ulp.ld:48` → `FLASH LENGTH = 64K`), y **corta de verdad**: antes podía crecer 1 MB por encima
+  de su partición y pisar `app-b` sin que `ld` avisara.
 - **App slots de 1 MB** (3,4× lo que ocupa el kernel hoy) en vez de los 512 KB del plan A
   antiguo, porque con `-O2` y LVGL/FAT dentro el kernel ya pesa 299 KB y 512 KB daban 1,7×.
 - **`factory` de 960 KB** en el hueco que hoy está sin proteger: es la imagen que garantiza que
@@ -95,22 +99,39 @@ Decisiones que lleva puestas:
   ~2,6 s a ~115 KB/s de programación, y no depende de que la SD esté montada ni de
   `sdmmcBusLock()` compitiendo con el C6.
 
-### 3.1 RAM de la ULP: 20 KB
+### 3.1 RAM de la ULP: 32 KB (aplicado el 2026-11-04)
 
-Hoy la ULP usa **1 KB** (`__STACK_SIZE = 1K`, [ulp.ld:33](../../machine/ulp/ulp.ld); `.bss` = 0 y
-`.data` = 0 medidos en `machine/build/ulp.elf`). 20 KB es margen 20× para el caso de uso que
-se le dé (anillo de sensores, colas). Dos formas de dárselas:
+Hoy la ULP usa **1 KB** (`__STACK_SIZE = 1K`, [ulp.ld:40](../../machine/ulp/ulp.ld); `.bss` = 0 y
+`.data` = 0 medidos en `machine/build/ulp.elf`; tras el traslado `__STACK_TOP = 0x49FF8400`), así
+que 32 KB es margen 32× para el caso de uso que se le dé (anillo de sensores, colas).
 
-| opción | dónde | qué cambia | riesgo |
-|---|---|---|---|
-| **R-1 conservadora** | cola de PSRAM: `0x49FFB000..0x4A000000` | `ulp.ld:42` → `ORIGIN = 0x49FFB000, LENGTH = 20K`; `ld.script:27` → `RAM LENGTH = 32M-20K` (`0x01FFB000`) | ninguno nuevo: mismo bus que ya usa hoy; **gana ~1.028 KB** de heap PSRAM el kernel |
-| **R-2 recomendada** | `LP_SRAM`: `0x50108000..0x5010D000` (20 KB de los 32 KB, 12 KB libres como buzón HP↔LP) | `ulp.ld:42` → `ORIGIN = 0x50108000, LENGTH = 20K`; `ld.script:27` y `:245` → `RAM LENGTH = 32M` | hay que **medir** que el core LP accede a `0x50108000` (patrón escribir/leer desde `ulp/main.c`) y que la región no se apaga con el dominio de potencia LP. A cambio el kernel se queda los **32 MB enteros** de PSRAM |
+Lo aplicado es **R-1**: el LP se va al final exacto del PSRAM y el kernel ocupa todo lo demás.
 
-Con R-2 desaparece el acoplamiento peligroso que ya advierte
-[01-memoria-nucleos.md:99-114](01-memoria-nucleos.md): hoy `RAM LENGTH = 31M` del kernel y
-`RAM ORIGIN = 0x49F00000` de la ULP son **la misma cota escrita dos veces en dos ficheros**; si
-alguien la sube a 32M, el heap del kernel se come la RAM de la ULP en silencio y el fallo
-aparece como corrupción en el C6. Mover la ULP a LP_SRAM corta ese contrato por la raíz.
+```
+ulp.ld:48-49    FLASH ORIGIN 0x40100000 LENGTH 64K   |   RAM ORIGIN 0x49FF8000 LENGTH 32K
+ld.script:33    RAM : ORIGIN = 0x48000000, LENGTH = 32M-32K
+```
+
+Con `LENGTH = 32M-32K`, el `_psram_free_end = ORIGIN(RAM)+LENGTH(RAM)` de
+[ld.script:251](../../compile/platforms/esp32p4/ld.script) cae en `0x49FF8000`, que es el `ORIGIN`
+del LP: las dos reservas **teselan** el PSRAM sin solape. Los símbolos del enlace lo confirman
+(`_psram_free_end = 0x49ff8000` en `xinu.elf`, `__STACK_TOP = 0x49ff8400` en `ulp.elf`), y la placa
+también: `syscheck mem` da **33.361.920 B libres, span `0x48027000..0x49ff8000`** frente a los
+32.346.112 B de antes — **+1.015.808 B exactos = 992 KB** — y el autotest de arranque sube de
+`31588 KiB free` a `32580 KiB free`. El `ulp.bin` cambió (`0x97` sigue siendo el primer byte en
+`0x100000`, `syscheck flash` 3/3).
+
+El límite se comprueba ligando con una pila de 64 KB → `ld: region 'RAM' overflowed by 32768 bytes`.
+
+Queda sobre la mesa **R-2**, que es la que corta el acoplamiento por la raíz: mover el LP a
+`LP_SRAM` (`0x50108000..0x5010D000`, 32 KB) y dejar `RAM LENGTH = 32M` en el kernel. Su coste es
+que hay que **medir** antes que el core LP accede de verdad a `0x50108000` (patrón escribir/leer
+desde `ulp/main.c`, que hoy tiene el `printf` comentado y `main()` vacío) y que esa región no se
+apague con el dominio de potencia LP. Mientras el LP viva en PSRAM sigue vigente el contrato que
+advierte [01-memoria-nucleos.md:99-114](01-memoria-nucleos.md): `LENGTH(RAM)` del kernel y
+`ORIGIN(RAM)` de `ulp.ld` son **la misma cota escrita dos veces en dos ficheros**; si alguien la
+sube a `32M`, el heap del kernel se come la pila del LP en silencio y el fallo aparece como
+corrupción en el C6.
 
 ---
 
@@ -216,8 +237,8 @@ una fecha.
 | fichero | línea | cambio |
 |---|---|---|
 | `compile/platforms/esp32p4/ld.script` | 26 | `FLASH ORIGIN` → `0x40110040` (slot A) / variante `0x40210040` (slot B) vía `-DSLOT` o `ld -T` por ranura |
-| idem | 27, 245 | `RAM LENGTH` → `32M` (si R-2) o `0x01FFB000` (si R-1) |
-| `machine/ulp/ulp.ld` | 41, 42 | `FLASH LENGTH = 64K`; `RAM ORIGIN/LENGTH = 20K` en `0x50108000` (R-2) o `0x49FFB000` (R-1) |
+| idem | 27, 245 | `RAM LENGTH` → `32M` (si R-2) o `0x01FF8000` (si R-1) |
+| `machine/ulp/ulp.ld` | 41, 42 | **hecho**: `FLASH LENGTH = 64K`, `RAM LENGTH = 32K` (origen intacto, `0x49F00000`). Pendiente de decisión: mover el origen a `0x50108000` (R-2) o `0x49FF8000` (R-1) para devolver los 992 KB al kernel |
 | `machine/sbl/SBL.ld` | 28 | sin cambio de valor (`0x40005000` ahora apunta a `bl2`); 33 sin cambio (ULP se queda en `0x100000`) |
 | `compile/platforms/esp32p4/platformVars` | 162-179 | offsets nuevos en `flash`/`flashxinu` + reglas `flashbl2`, `flashfactory`, `mkimage` |
 | `machine/bl2/` (nuevo) | — | `boot.S`, `main.c`, `bl2.ld` (XIP en `0x40005000`), `flash_ops.S` (rutina de programa/borrar que se copia a `0x4FF20000`) |
@@ -226,8 +247,10 @@ una fecha.
 
 Orden de implantación propuesto (cada etapa con su prueba en placa, ninguna se aplica sin OK):
 
-1. **Preparar el mapa sin cambiar el arranque**: `ulp.ld` a 64 KB/20 KB (R-1, cero riesgo de
-   bus) y `FLASH LENGTH = 15M` en el kernel para que `ld` corte si crece demasiado. Prueba:
+1. **Preparar el mapa sin cambiar el arranque**: hecho a medias — `ulp.ld` ya está a
+   **64 KB de flash / 32 KB de RAM** (origen sin mover), falta `FLASH LENGTH = 15M` en el kernel
+   para que `ld` corte si crece demasiado, y falta decidir R-1/R-2 para devolver los 992 KB.
+   Prueba:
    `syscheck flash` sigue dando `0x6f` en `0x5000` y `0x97` en `0x100000`, y `syscheck net` intacto.
 2. **Driver de escritura de flash** (`device/flash`) + `syscheck flash --crc`. Prueba: copiar
    `xinu.boot` a `stage` y volverlo a leer con CRC igual, sin reset, y con el C6 enviando

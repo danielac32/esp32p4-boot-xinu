@@ -24,7 +24,7 @@ void timer_init(void);
  * Monotonic for 2^32 ms (~49 days). */
 uint32_t millis(void);
 
-/* Microseconds, from the raw mtime counter (360 MHz on the P4).  The 32-bit
+/* Microseconds, from the raw mtime counter (400 MHz on the P4, CPLL).  The 32-bit
  * result wraps every ~11.9 s, so only use it for short intervals and always
  * with unsigned subtraction. */
 uint32_t micros(void);

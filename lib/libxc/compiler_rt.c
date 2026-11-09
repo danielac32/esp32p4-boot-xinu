@@ -1,13 +1,17 @@
 /**
  * @file compiler_rt.c
  *
- * Minimal compiler run-time helpers for RV32.  The P4 kernel is linked
- * without libgcc, so the few integer routines the compiler cannot expand
- * inline (64-bit division, bit scanning) are provided here.
+ * Minimal compiler run-time helpers for RV32.  These are the routines the
+ * compiler cannot expand inline and that the link does not already get from
+ * somewhere else: the 64-bit integer helpers (division, bit scanning) live
+ * here, while the double-precision arithmetic the JVM pulls in comes from
+ * the chip's mask ROM -- see the PROVIDE block in
+ * compile/platforms/esp32p4/ld.script.  Only the narrowing double -> float
+ * is missing from both libgcc and the ROM, and that one is below.
  *
- * All the routines are written with 32-bit operations only on purpose: using
- * 64-bit shifts/multiplies in their own implementation would just pull in more
- * helpers (__lshrdi3, __muldi3, ...) and defeat the point.
+ * The integer routines are written with 32-bit operations only on purpose:
+ * using 64-bit shifts/multiplies in their own implementation would just pull
+ * in more helpers (__lshrdi3, __muldi3, ...) and defeat the point.
  */
 /* Embedded Xinu, Copyright (C) 2026.  All rights reserved. */
 
@@ -170,4 +174,131 @@ uint64_t __umoddi3(uint64_t a, uint64_t b)
 
     (void) udiv64(a, b, &r);
     return r;
+}
+
+/* ---------------- doble -> simple (IEEE-754) ----------------
+ * El ROM del P4 trae el set df casi entero (ver las PROVIDE de
+ * compile/platforms/esp32p4/ld.script) y el libgcc de la multilib ilp32f
+ * solo trae 6 rutinas; la que falta en los dos sitios es esta, la estrecha
+ * de doble a simple.  La pide el interprete de la JVM en los opcodes de
+ * float (bytecodes.c hace la cuenta en doble y estrecha), y sin ella el
+ * enlace queda roto.
+ *
+ * Los dos bits de entrada que importan son los 32 de arriba y los 32 de
+ * abajo del patrón de 64: se sacan con union, no con divisiones.  A partir
+ * de ahi todo son mascaras y turnos de 32 bits, salvo el salto de 64 bits
+ * que monta el numero de 53 (s_hi:s_lo); se evitan turnos de 64 variables
+ * separando los tres casos de sh (por debajo, justo en, y por encima de 32)
+ * --que es el suelo que impone la cabecera de este fichero.
+ *
+ * Redondeo half-even, el mismo del conversor de hardware: se mira el bit de
+ * turno (round) y si aun queda algo por debajo (sticky); con empate se
+ * elige el mantissa par.  Con esto la funcion es bit a bit igual a
+ * `(float)d' para cualquier d: comprobado en el host contra 2.640.025
+ * valores (normales, subnormales de entrada y de salida, 0/-0, Inf, NaN,
+ * desbordes y patrones de bits aleatorios) --0 diferencias. */
+float __truncdfsf2(double a)
+{
+    union { double d; uint64_t u; } in;
+    union { float f; uint32_t u; } out;
+    uint32_t hi, lo, sign, exp, mhi, mlo, kept, round, sticky;
+    int e;
+
+    in.d = a;
+    hi = (uint32_t)(in.u >> 32);
+    lo = (uint32_t)in.u;
+    sign = hi >> 31;
+    exp = (hi >> 20) & 0x7FFu;      /* exponente sesgado por 1023 */
+    mhi = hi & 0xFFFFFu;            /* mantissa, bits 51..32           */
+    mlo = lo;                       /* mantissa, bits 31..0            */
+
+    if (exp == 0x7FFu)
+    {
+        /* Inf se pasa como Inf; NaN como NaN silencioso, con su signo. */
+        out.u = (sign << 31) | ((mhi | mlo) ? 0x7FC00000u : 0x7F800000u);
+        return out.f;
+    }
+    if (exp == 0u)
+    {
+        /* Cero o subnormal de doble: todo eso vale menos que el subnormal
+         * mas pequeno del simple (2^-149), asi que estrecha a +-0. */
+        out.u = sign << 31;
+        return out.f;
+    }
+
+    e = (int)exp - 1023;
+    if (e >= 128)
+    {
+        out.u = (sign << 31) | 0x7F800000u;     /* desborda a Inf */
+        return out.f;
+    }
+
+    if (e >= -126)
+    {
+        /* Normal de salida: de 52 bits de fraccion a 23, se tiran 29. */
+        kept = (mhi << 3) | (mlo >> 29);
+        round = (mlo >> 28) & 1u;
+        sticky = mlo & 0x0FFFFFFFu;
+        if (round && (sticky || (kept & 1u)))
+        {
+            kept++;
+            if (kept == 0x800000u)
+            {
+                /* la fraccion se lleva a 1.0: sube el exponente */
+                kept = 0u;
+                if (++e >= 128)
+                {
+                    out.u = (sign << 31) | 0x7F800000u;
+                    return out.f;
+                }
+            }
+        }
+        out.u = (sign << 31) | ((uint32_t)(e + 127) << 23) | kept;
+        return out.f;
+    }
+
+    /* Subnormal de salida: sin el 1 implicito en el exponente, el valor es
+     * M x 2^-149 con M = s / 2^sh, donde s = 2^52 + fraccion (los 53 bits
+     * del significando) y sh = -e - 97.  Aqui sh cae entre 30 y 53. */
+    {
+        uint32_t s_hi = 0x100000u | mhi;    /* s, bits 52..32 (21 bits) */
+        uint32_t s_lo = mlo;                /* s, bits 31..0            */
+        uint32_t sh = (uint32_t)(-e - 97);
+        uint32_t M, r, st, t;
+
+        if (sh > 53u)
+        {
+            out.u = sign << 31;
+            return out.f;
+        }
+        if (sh < 32u)
+        {
+            M = (s_hi << (32u - sh)) | (s_lo >> sh);
+            r = (s_lo >> (sh - 1u)) & 1u;
+            st = (s_lo & ((1u << (sh - 1u)) - 1u)) != 0u;
+        }
+        else if (sh == 32u)
+        {
+            M = s_hi;
+            r = (s_lo >> 31) & 1u;
+            st = (s_lo & 0x7FFFFFFFu) != 0u;
+        }
+        else
+        {
+            t = sh - 32u;                   /* 1..21 */
+            M = s_hi >> t;
+            r = (s_hi >> (t - 1u)) & 1u;
+            st = ((s_hi & ((1u << (t - 1u)) - 1u)) | s_lo) != 0u;
+        }
+        if (r && (st || (M & 1u)))
+        {
+            M++;
+            /* Si M estaba en 0x7FFFFF, el +1 lo deja en 0x800000, y ese
+             * patron ES el normal mas pequeno (exponente 1, fraccion 0):
+             * el subnormal maximo redondea hacia arriba y cae justo en el
+             * vecino normal, sin tramo aparte. */
+        }
+        out.u = (sign << 31) | M;
+        return out.f;
+    }
 }
