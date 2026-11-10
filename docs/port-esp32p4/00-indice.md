@@ -43,6 +43,7 @@ heap PSRAM de 32.346.112 B a **33.361.920 B (+992 KB exactos)** (documento 07 §
 | [05-roadmap-y-conf.md](05-roadmap-y-conf.md) | TinySTT/TTS, TinyUSB, cámara OV5647, MP3, actualización por UDP + bootloader, dashboard en SD; y revisión de recursos de `conf.c` | 13..19 |
 | [06-syscheck.md](06-syscheck.md) | cómo medir la velocidad real del CPU y si `millis()` funciona, y chequeo completo del kernel — **mandos cableados y cifras medidas** | (pedido inicial), 1 |
 | [07-flash-map-diseño.md](07-flash-map-diseño.md) | **diseño, salvo la ULP ya recortada**: mapa de particiones de 16 MB, bootloader `bl2` detrás del SBL, A/B + `factory` + `stage`, y la ULP con **64 KB de flash y 32 KB de RAM** (aplicado en `ulp.ld`) | 18 |
+| [08-smp.md](08-smp.md) | **diseño, nada implementado**: SMP real en los dos HP cores — L1-D compartida, L1-I por core, gran candado del kernel en `disable()/restore()`, planificador por core con afinidad, Timer por hart y fases de bring-up | (fase B) |
 
 Dashboard Material Design de todo esto:
 [xinu-p4-dashboard.html](../xinu-p4-dashboard.html) (ver §"dashboard" de

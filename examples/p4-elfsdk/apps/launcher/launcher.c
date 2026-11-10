@@ -33,17 +33,25 @@ void exit(int codigo);
 
 /* Una app descubierta en /apps/. */
 #define MAX_APPS    12
+#define APPS_PER_PAGE 6
 #define APP_NAMELEN 32
 #define APP_PATHLEN 80
 #define APP_ICONLEN 96
 
+#define ICON_W 96
+#define ICON_H 96
+#define ICON565_SIZE (ICON_W * ICON_H * 2)
+
 struct app_info
 {
     char   name[APP_NAMELEN];
+    char   dir[APP_NAMELEN];
     char   exec[APP_PATHLEN];
-    char   icon[APP_ICONLEN]; /* ruta LVGL, ej. S:/apps/musica/icon.jpg */
+    char   icon[APP_ICONLEN]; /* ruta LVGL fallback, ej. S:/apps/x/icon.jpg */
     uint32 color;
     int    used;
+    uint8_t *px;               /* RGB565 cache en PSRAM (ICON565_SIZE) */
+    lv_img_dsc_t dsc;          /* descriptor LVGL apuntando a px */
 };
 
 #define P_HOME    0
@@ -56,7 +64,8 @@ struct app_info
 
 #define VIGIA_STK   8192
 #define VIGIA_MS    200
-#define APAGADO_MS  120000
+#define SCREEN_FILE "/screen.txt"
+#define SCREEN_DEFAULT_MIN 2
 #define RUN_STK     16384
 
 #define C_FONDO  0x1B1408
@@ -66,15 +75,17 @@ struct app_info
 
 struct launcher
 {
-    gestos_t *g;
-    estado_t *e;
+    ui_input_t *g;
+    statusbar_t *e;
     lv_obj_t *chip;
     lv_obj_t *hint;
     struct app_info apps[MAX_APPS];
     int napp;
+    int page;           /* pagina horizontal del home */
     int pagina;         /* P_HOME / P_SWITCH */
     int oculto;         /* UI oculta (hay app en frente) */
     int cerrar;
+    int screen_ms;
     tid_typ vig_tid;
 };
 
@@ -159,11 +170,49 @@ static int leer_app(const char *dir, struct app_info *ai)
         p = eol;
     }
 
+    strncpy(ai->dir, dir, APP_NAMELEN - 1);
     if (ai->name[0] == '\0') strncpy(ai->name, dir, APP_NAMELEN - 1);
     if (ai->exec[0] == '\0') snprintf(ai->exec, sizeof(ai->exec), "/apps/%s/app.elf", dir);
     ai->used = 1;
     (void)i;
     return 1;
+}
+
+static int load_icon565(struct app_info *ai)
+{
+    char path[96];
+    void *f;
+    int n;
+
+    if (NULL == ai || ai->dir[0] == '\0') return 0;
+    if (ai->dsc.data != NULL) return 1;
+    if (ai->px == (uint8_t *)-1) return 0; /* ya intento y fallo */
+
+    snprintf(path, sizeof(path), "/apps/%s/icon565.bin", ai->dir);
+    f = fl_fopen(path, "r");
+    if (NULL == f) { ai->px = (uint8_t *)-1; return 0; }
+    ai->px = (uint8_t *)psram_malloc(ICON565_SIZE);
+    if (NULL == ai->px) { fl_fclose(f); ai->px = (uint8_t *)-1; return 0; }
+    n = fl_fread(ai->px, 1, ICON565_SIZE, f);
+    fl_fclose(f);
+    if (n != ICON565_SIZE) { psram_free(ai->px); ai->px = (uint8_t *)-1; return 0; }
+
+    memset(&ai->dsc, 0, sizeof(ai->dsc));
+    ai->dsc.header.always_zero = 0;
+    ai->dsc.header.w = ICON_W;
+    ai->dsc.header.h = ICON_H;
+    ai->dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+    ai->dsc.data_size = ICON565_SIZE;
+    ai->dsc.data = ai->px;
+    return 1;
+}
+
+static void free_app_icons(struct launcher *l)
+{
+    int i;
+    for (i = 0; i < MAX_APPS; i++)
+        if (l->apps[i].px != NULL && l->apps[i].px != (uint8_t *)-1)
+            psram_free(l->apps[i].px);
 }
 
 /* Escanea /apps/ y carga el catalogo. */
@@ -172,6 +221,7 @@ static void scan_apps(struct launcher *l)
     FL_DIR d;
     fl_dirent e;
 
+    free_app_icons(l);
     l->napp = 0;
     memset(l->apps, 0, sizeof(l->apps));
     if (NULL == fl_opendir("/apps", &d))
@@ -208,12 +258,10 @@ static int app_runner(char *path)
     return 0;
 }
 
+/* Chip label removed by design; keep no-op to preserve call sites. */
 static void chip_set(struct launcher *l, const char *txt)
 {
-    if (NULL == l->chip) return;
-    lvgl_lock();
-    lv_label_set_text(l->chip, txt);
-    lvgl_unlock();
+    (void)l; (void)txt;
 }
 
 static void hint_set(struct launcher *l, const char *txt)
@@ -238,14 +286,14 @@ static int hay_app_running(void)
 static void ocultar_ui(struct launcher *l)
 {
     if (l->oculto) return;
-    gestos_show(l->g, 0);
+    ui_show(l->g, 0);
     l->oculto = 1;
 }
 
 static void mostrar_ui(struct launcher *l)
 {
     if (!l->oculto) return;
-    gestos_show(l->g, 1);
+    ui_show(l->g, 1);
     l->oculto = 0;
 }
 
@@ -290,50 +338,60 @@ static void lanzar_app(struct launcher *l, int idx)
     }
 }
 
-/* Boton de icono: tarjeta gestos_boton sin texto + lv_img centrada. */
+/* Boton de icono: tarjeta ui_button sin texto + lv_img centrada.
+ * Prefiere icon565.bin precacheado en PSRAM (carga rapida) y cae a icon (SJPG). */
 static void boton_icono(struct launcher *l, int id, struct app_info *ai,
                         int x, int y, int w, int h)
 {
-    lv_obj_t *btn = gestos_boton(l->g, id, "", x, y, w, h, ai->color);
+    lv_obj_t *btn = ui_button(l->g, id, "", x, y, w, h, ai->color);
     if (NULL == btn) return;
+    load_icon565(ai); /* FAT I/O fuera de lvgl_lock */
     lvgl_lock();
     /* Quitar el rotulo de texto (unico hijo) para mostrar solo el dibujo. */
     if (lv_obj_get_child_cnt(btn) > 0)
     {
         lv_obj_del(lv_obj_get_child(btn, 0));
     }
-    if (ai->icon[0] != '\0')
+    if (ai->dsc.data != NULL || ai->icon[0] != '\0')
     {
         lv_obj_t *img = lv_img_create(btn);
-        lv_img_set_src(img, ai->icon);
+        if (ai->dsc.data != NULL) lv_img_set_src(img, &ai->dsc);
+        else                       lv_img_set_src(img, ai->icon);
         lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_center(img);
     }
     lvgl_unlock();
 }
 
+static void home_draw(struct launcher *l)
+{
+    int i, col, row, x, y, base, pages;
+    char h[24];
+
+    ui_buttons_clear(l->g);
+    pages = (l->napp + APPS_PER_PAGE - 1) / APPS_PER_PAGE;
+    if (pages < 1) pages = 1;
+    if (l->page >= pages) l->page = pages - 1;
+    if (l->page < 0) l->page = 0;
+    base = l->page * APPS_PER_PAGE;
+    for (i = 0; i < APPS_PER_PAGE && (base + i) < l->napp; i++)
+    {
+        col = i % 2; row = i / 2;
+        x = 11 + col * 153; y = 106 + row * 108;
+        boton_icono(l, ID_APP + base + i, &l->apps[base + i], x, y, 145, 100);
+    }
+    if (0 == l->napp) hint_set(l, "no apps in /apps");
+    else if (pages > 1) { snprintf(h, sizeof(h), "< %d/%d >", l->page + 1, pages); hint_set(l, h); }
+    else hint_set(l, "");
+}
+
 static void pantalla_home(struct launcher *l)
 {
-    int i, col, row, x, y;
-
     l->pagina = P_HOME;
+    l->page = 0;
     scan_apps(l);
-    gestos_botones_limpiar(l->g);
     chip_set(l, "Launcher");
-    hint_set(l, "swipe up = apps");
-
-    for (i = 0; i < l->napp; i++)
-    {
-        col = i % 2;
-        row = i / 2;
-        x = 11 + col * 153;
-        y = 106 + row * 108;
-        boton_icono(l, ID_APP + i, &l->apps[i], x, y, 145, 100);
-    }
-    if (0 == l->napp)
-    {
-        chip_set(l, "no apps in /apps");
-    }
+    home_draw(l);
 }
 
 static void pantalla_switch(struct launcher *l)
@@ -343,9 +401,9 @@ static void pantalla_switch(struct launcher *l)
     char label[48];
 
     l->pagina = P_SWITCH;
-    gestos_botones_limpiar(l->g);
+    ui_buttons_clear(l->g);
     chip_set(l, "Apps");
-    hint_set(l, "tap=resume  X=close  swipe down=back");
+    hint_set(l, "");
 
     t = appmgr_table();
     n = appmgr_count();
@@ -361,14 +419,13 @@ static void pantalla_switch(struct launcher *l)
             snprintf(label, sizeof(label), "%s (closing)", t[i].name);
         else
             snprintf(label, sizeof(label), "%s", t[i].name);
-        gestos_boton(l->g, ID_RESUME + i, label, 11, y, 245, 52,
+        ui_button(l->g, ID_RESUME + i, label, 11, y, 245, 52,
                      t[i].color ? t[i].color : C_CARD);
-        gestos_boton(l->g, ID_CLOSE + i, "X", 264, y, 45, 52, 0xC0392B);
+        ui_button(l->g, ID_CLOSE + i, "X", 264, y, 45, 52, 0xC0392B);
         y += 60;
-        if (y > 380) break;
+        if (y > 400) break;
     }
     if (0 == activos) chip_set(l, "no active apps");
-    gestos_boton(l->g, ID_BACK, "Back", 11, 420, 298, 44, 0x3A2A14);
 }
 
 static void mostrar_switch(struct launcher *l)
@@ -382,21 +439,24 @@ static void mostrar_switch(struct launcher *l)
     chip_set(l, "no active apps");
 }
 
-static void procesar(struct launcher *l, gev_t *ev)
+static void procesar(struct launcher *l, ui_event_t *ev)
 {
-    if (GE_ARRASTRE == ev->tipo)
+    if (UI_EVENT_SWIPE == ev->tipo)
     {
         if (P_HOME == l->pagina)
         {
-            if (GE_ARRIBA == ev->dir) mostrar_switch(l);
+            if (UI_DIR_UP == ev->dir) mostrar_switch(l);
+            else if (UI_DIR_LEFT == ev->dir) { l->page++; home_draw(l); }
+            else if (UI_DIR_RIGHT == ev->dir) { l->page--; home_draw(l); }
         }
         else
         {
-            if (GE_ABAJO == ev->dir) pantalla_home(l);
+            /* Switcher: swipe up returns to home. */
+            if (UI_DIR_UP == ev->dir) pantalla_home(l);
         }
         return;
     }
-    if (GE_BOTON != ev->tipo) return;
+    if (UI_EVENT_BUTTON != ev->tipo) return;
 
     if (ev->id >= ID_APP && ev->id < ID_APP + l->napp)
     {
@@ -424,7 +484,31 @@ static void procesar(struct launcher *l, gev_t *ev)
         }
         return;
     }
-    if (ID_BACK == ev->id) pantalla_home(l);
+}
+
+static int read_screen_ms(void)
+{
+    void *f;
+    char buf[16];
+    int n, mins = SCREEN_DEFAULT_MIN;
+    int i = 0, v = 0;
+
+    f = fl_fopen(SCREEN_FILE, "r");
+    if (NULL != f)
+    {
+        n = fl_fread(buf, 1, (int)sizeof(buf) - 1, f);
+        fl_fclose(f);
+        if (n > 0)
+        {
+            buf[n] = '\0';
+            while (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' || buf[i] == '\n') i++;
+            while (buf[i] >= '0' && buf[i] <= '9') { v = v * 10 + (buf[i] - '0'); i++; }
+            if (v > 0) mins = v;
+        }
+    }
+    if (mins < 1) mins = 1;
+    if (mins > 120) mins = 120;
+    return mins * 60 * 1000;
 }
 
 static void vigia(ulong arg)
@@ -433,10 +517,10 @@ static void vigia(ulong arg)
     int d;
 
     d = (int)getdev("LVGL0");
-    if (SYSERR != d) control(d, LVGL_CTRL_IDLE, APAGADO_MS, 0);
+    if (SYSERR != d) control(d, LVGL_CTRL_IDLE, l->screen_ms, 0);
     while (!l->cerrar)
     {
-        if (!l->oculto && l->e != NULL) estado_refrescar(l->e);
+        if (!l->oculto && l->e != NULL) statusbar_refresh(l->e);
         sleep(VIGIA_MS);
     }
     if (SYSERR != d) control(d, LVGL_CTRL_IDLE, 0, 0);
@@ -446,7 +530,7 @@ static void vigia(ulong arg)
 int main(int argc, char *argv[])
 {
     struct launcher *l;
-    gev_t ev;
+    ui_event_t ev;
 
     (void)argc; (void)argv;
     printf("launcher: /apps manager (tid=%d)\r\n", gettid());
@@ -456,24 +540,22 @@ int main(int argc, char *argv[])
     memset(l, 0, sizeof(struct launcher));
     l->vig_tid = SYSERR;
 
-    l->g = gestos_nueva_partes(0);
+    l->g = ui_create_ex(UI_CHROME_NONE);
     if (NULL == l->g) { psram_free(l); exit(1); }
 
     lvgl_lock();
-    lv_obj_set_style_bg_color(gestos_raiz(l->g), lv_color_hex(C_FONDO), 0);
-    lv_obj_set_style_bg_grad_dir(gestos_raiz(l->g), LV_GRAD_DIR_NONE, 0);
-    lv_obj_set_style_bg_opa(gestos_raiz(l->g), LV_OPA_COVER, 0);
-    l->chip = lv_label_create(gestos_raiz(l->g));
-    lv_label_set_text(l->chip, "");
-    lv_obj_set_style_text_color(l->chip, lv_color_hex(C_TEXTO), 0);
-    lv_obj_set_pos(l->chip, 8, 78);
-    l->hint = lv_label_create(gestos_raiz(l->g));
+    lv_obj_set_style_bg_color(ui_root(l->g), lv_color_hex(C_FONDO), 0);
+    lv_obj_set_style_bg_grad_dir(ui_root(l->g), LV_GRAD_DIR_NONE, 0);
+    lv_obj_set_style_bg_opa(ui_root(l->g), LV_OPA_COVER, 0);
+    l->chip = NULL;
+    l->hint = lv_label_create(ui_root(l->g));
     lv_label_set_text(l->hint, "");
     lv_obj_set_style_text_color(l->hint, lv_color_hex(C_HINT), 0);
     lv_obj_set_pos(l->hint, 8, 450);
     lvgl_unlock();
 
-    l->e = estado_nueva(gestos_raiz(l->g), 8, 8, 304);
+    l->e = statusbar_create(ui_root(l->g), 8, 8, 304);
+    l->screen_ms = read_screen_ms();
     pantalla_home(l);
 
     l->vig_tid = create((void *)vigia, VIGIA_STK, getprio(gettid()),
@@ -488,7 +570,7 @@ int main(int argc, char *argv[])
             mostrar_ui(l);
             if (P_SWITCH == l->pagina) pantalla_switch(l);
         }
-        while (gestos_leer(l->g, &ev))
+        while (ui_poll(l->g, &ev))
         {
             if (!l->oculto) procesar(l, &ev);
         }

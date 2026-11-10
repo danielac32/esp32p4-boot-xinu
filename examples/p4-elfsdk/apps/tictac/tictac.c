@@ -21,7 +21,7 @@
  *
  * Estado: todo en un bloque de PSRAM colgado del handle (tablero, marcador y
  * punteros a los objetos).  Nada de estaticas escribibles, que el cargador de
- * ELF no las soporta.  El bucle de main saca eventos con gestos_leer() y solo
+ * ELF no las soporta.  El bucle de main saca eventos con ui_poll() y solo
  * el llama a exit(); los callbacks de LVGL corren en lvglui y solo apilan.
  */
 
@@ -75,7 +75,7 @@ void exit(int codigo);
 
 struct juego
 {
-    gestos_t *g;
+    ui_input_t *g;
     int b[9];                    /* 0 vacia, FX = X, FO = O                     */
     int turno;                   /* FX o FO                                     */
     int fin;                     /* 0 jugando; FX/FO ganador; 3 tablas          */
@@ -111,16 +111,16 @@ static void plano(lv_obj_t *o)
 
 static void crear(struct juego *m)
 {
-    lv_obj_t *raiz = gestos_raiz(m->g);
+    lv_obj_t *raiz = ui_root(m->g);
     int i, fila, col;
 
-    /* Los botones primero: gestos_boton() toma el candado por dentro, asi que
+    /* Los botones primero: ui_button() toma el candado por dentro, asi que
      * no pueden crearse dentro del bloque con lock de mas abajo. */
     for (i = 0; i < 9; i++)
     {
         fila = i / 3;
         col = i % 3;
-        m->celda[i] = gestos_boton(m->g, ID_CELDA + i, "",
+        m->celda[i] = ui_button(m->g, ID_CELDA + i, "",
                                    X0 + col * PASO, Y0 + fila * PASO,
                                    CELDA, CELDA, C_CELDA);
     }
@@ -246,9 +246,9 @@ static void crear(struct juego *m)
 
     lvgl_unlock();
 
-    gestos_boton(m->g, ID_NUEVA, "OTRA PARTIDA", X_NUEVA, Y_NUEVA,
+    ui_button(m->g, ID_NUEVA, "OTRA PARTIDA", X_NUEVA, Y_NUEVA,
                  AN_NUEVA, AL_NUEVA, C_AMBER);
-    gestos_boton(m->g, ID_SALIR, "X", X_SALIR, Y_SALIR,
+    ui_button(m->g, ID_SALIR, "X", X_SALIR, Y_SALIR,
                  AN_SALIR, AL_SALIR, C_AMBER);
 }
 
@@ -520,11 +520,11 @@ static void volcar(struct juego *m)
 
 static void ir_fondo(struct juego *m, int *fuera);
 
-static void procesar(struct juego *m, gev_t *ev, int *fuera)
+static void procesar(struct juego *m, ui_event_t *ev, int *fuera)
 {
-    if (GE_ARRASTRE == ev->tipo)
+    if (UI_EVENT_SWIPE == ev->tipo)
     {
-        if (GE_ARRIBA == ev->dir)
+        if (UI_EDGE_BOTTOM == ev->edge && UI_DIR_UP == ev->dir)
         {
             ir_fondo(m, fuera);
         }
@@ -532,7 +532,7 @@ static void procesar(struct juego *m, gev_t *ev, int *fuera)
     }
     /* Solo interesan los botones: un toque en el fondo o un arrastre no mueven
      * ficha (el arrastre se sigue midiendo para no romper el gesto comun). */
-    if (GE_BOTON != ev->tipo)
+    if (UI_EVENT_BUTTON != ev->tipo)
     {
         return;
     }
@@ -563,27 +563,27 @@ static void salir(struct juego *m)
     {
         appmgr_unregister(m->slot);
     }
-    gestos_cerrar(m->g);
+    ui_destroy(m->g);
     psram_free(m);
 }
 
 static void ir_fondo(struct juego *m, int *fuera)
 {
-    gev_t ev;
+    ui_event_t ev;
     int s;
 
     if (m->slot < 0)
     {
         return;
     }
-    gestos_show(m->g, 0);
+    ui_show(m->g, 0);
     appmgr_set_state(m->slot, APP_BACKGROUND);
     while (!*fuera)
     {
         s = appmgr_get_state(m->slot);
         if (APP_RUNNING == s)
         {
-            gestos_show(m->g, 1);
+            ui_show(m->g, 1);
             return;
         }
         if (APP_CLOSING == s || APP_FREE == s)
@@ -591,7 +591,7 @@ static void ir_fondo(struct juego *m, int *fuera)
             *fuera = 1;
             return;
         }
-        while (gestos_leer(m->g, &ev))
+        while (ui_poll(m->g, &ev))
         {
             ;
         }
@@ -602,7 +602,7 @@ static void ir_fondo(struct juego *m, int *fuera)
 int main(int argc, char *argv[])
 {
     struct juego *m;
-    gev_t ev;
+    ui_event_t ev;
     int fuera = 0;
 #ifdef PRUEBA_AUTO
     unsigned t_auto = millis();
@@ -623,7 +623,7 @@ int main(int argc, char *argv[])
     m->slot = SYSERR;
 
     /* La app pinta su propia cabecera: solo fondo, anillo y botones. */
-    m->g = gestos_nueva_partes(0);
+    m->g = ui_create_ex(UI_CHROME_NONE);
     if (NULL == m->g)
     {
         psram_free(m);
@@ -640,7 +640,7 @@ int main(int argc, char *argv[])
 
     while (!fuera)
     {
-        while (gestos_leer(m->g, &ev))
+        while (ui_poll(m->g, &ev))
         {
             procesar(m, &ev, &fuera);
             if (fuera)
@@ -678,11 +678,11 @@ int main(int argc, char *argv[])
                 }
                 if (n > 0)
                 {
-                    gev_t falso;
+                    ui_event_t falso;
 
                     /* Sin estado de azar: el reloj elige la casilla. */
                     memset(&falso, 0, sizeof(falso));
-                    falso.tipo = GE_BOTON;
+                    falso.tipo = UI_EVENT_BUTTON;
                     falso.id = ID_CELDA
                                + libres[(millis() >> 3) % (unsigned)n];
                     procesar(m, &falso, &fuera);
@@ -701,7 +701,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    salir(m);               /* gestos_cerrar() y psram_free(): una sola vez */
+    salir(m);               /* ui_destroy() y psram_free(): una sola vez */
     exit(0);
     return 0;
 }

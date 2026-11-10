@@ -3,126 +3,58 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Manual Xinu-P4.2 — Dashboard</title>
+<title>Manual Xinu-P4.2 — Vintage</title>
 <style>
-:root{
-  --primary:#4f6df5; --primary-dk:#2f49c4; --primary-lt:#e8ecfe;
-  --surface:#f7f7fb; --card:#ffffff; --on-surface:#1b1c1e; --muted:#5c616c;
-  --outline:#d5d7e0; --ok:#1b8a4c; --ok-bg:#e4f5ea; --warn:#b06500; --warn-bg:#fdf0dd;
-  --mono:"DejaVu Sans Mono",ui-monospace,Menlo,Consolas,monospace;
-  --e1:0 1px 2px rgba(0,0,0,.10),0 1px 3px 1px rgba(0,0,0,.06);
-  --e2:0 2px 6px 2px rgba(0,0,0,.10),0 1px 2px rgba(0,0,0,.12);
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--surface);color:var(--on-surface);font:15px/1.55 system-ui,"Segoe UI",Roboto,sans-serif}
-a{color:var(--primary-dk);text-decoration:none} a:hover{text-decoration:underline}
-code,.mono{font-family:var(--mono);font-size:.92em}
-.appbar{background:linear-gradient(135deg,var(--primary-dk),#1f347f);color:#fff;padding:18px 22px;box-shadow:var(--e2)}
-.appbar h1{margin:0;font-size:22px;font-weight:600}
-.appbar p{margin:4px 0 0;opacity:.88;font-size:13px}
-main{max-width:1180px;margin:0 auto;padding:20px}
-.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
-.card{background:var(--card);border-radius:12px;box-shadow:var(--e1);padding:16px 18px;display:flex;flex-direction:column}
-.card h2{margin:0 0 6px;font-size:17px}
-.card p{margin:0 0 12px;color:var(--muted);font-size:13.5px;flex:1}
-.tag{display:inline-block;font-size:11px;font-weight:700;border-radius:4px;padding:2px 8px;margin:0 4px 8px 0}
-.t-core{background:var(--primary-lt);color:var(--primary-dk)}
-.t-hw{background:#e2f2f8;color:#0b6b8c}
-.t-sw{background:var(--ok-bg);color:var(--ok)}
-.t-app{background:var(--warn-bg);color:var(--warn)}
-.btn{display:inline-block;align-self:flex-start;background:var(--primary);color:#fff;padding:8px 14px;border-radius:8px;font-weight:600;font-size:13px}
-.btn:hover{background:var(--primary-dk);text-decoration:none}
-.note{border-left:4px solid var(--primary);background:var(--primary-lt);border-radius:0 8px 8px 0;padding:12px 14px;margin:0 0 16px;font-size:13.5px}
-.warn{border-left-color:var(--warn);background:var(--warn-bg)}
-footer{max-width:1180px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);font-size:12px}
-ul{margin:6px 0 0 18px;padding:0}
+:root{--paper:#f6efe3;--paper2:#efe4d1;--ink:#2b2116;--muted:#6b5a46;--brass:#b08d57;--copper:#9a6a3a;--teal:#2f7d6d;--amber:#d9a441;--red:#a94442;--card:#fffaf0;--border:#d2c2a6;--mono:"DejaVu Sans Mono",ui-monospace,Menlo,Consolas,monospace}
+*{box-sizing:border-box} body{margin:0;background:linear-gradient(180deg,var(--paper),var(--paper2));color:var(--ink);font:15px/1.6 Georgia,"Times New Roman",serif}
+a{color:var(--copper)} .bar{background:linear-gradient(135deg,#3b2a18,#6b4a2a 55%,#8a6238);color:#f8efe0;padding:18px 22px;border-bottom:4px solid var(--brass)}
+.bar h1{margin:0;font:700 22px Georgia,serif}.bar p{margin:4px 0 0;color:#e8d7b8;font:13px system-ui,sans-serif}
+main{max-width:1100px;margin:0 auto;padding:18px}
+.note{border-left:4px solid var(--teal);background:#e7f1ec;padding:10px 12px;border-radius:0 8px 8px 0;margin:10px 0}
+.warn{border-left-color:var(--amber);background:#fbf2dd}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(290px,1fr))}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px;box-shadow:0 1px 3px rgba(43,33,22,.08);display:flex;flex-direction:column}
+.card h2{margin:0 0 6px;font:700 17px Georgia,serif}.card p{margin:0 0 10px;color:var(--muted);font:13.5px/1.45 system-ui,sans-serif;flex:1}
+.tag{display:inline-block;font:700 11px system-ui,sans-serif;padding:2px 7px;border-radius:4px;margin:0 4px 8px 0}
+.t{background:#dceee8;color:#1f5c4f}.t2{background:#f3e3c2;color:#7a5322}.t3{background:#e6ddcf;color:#5a4630}.t4{background:#e0e8f3;color:#274b7a}
+.btn{align-self:flex-start;background:var(--copper);color:#fff;padding:7px 12px;border-radius:7px;font:600 13px system-ui,sans-serif;text-decoration:none}
+.btn:hover{background:#7a5322;color:#fff} code{font-family:var(--mono);font-size:.92em;background:#efe4d1;padding:1px 4px;border-radius:4px}
+h3{font:700 16px Georgia,serif;margin:14px 0 6px}
+ul{margin:6px 0 6px 20px;font:13.5px/1.45 system-ui,sans-serif;color:var(--muted)}
 </style>
 </head>
 <body>
-<header class="appbar">
+<header class="bar">
   <h1>Manual técnico — Xinu-P4.2 (ESP32-P4)</h1>
-  <p>Documentación en profundidad del port bare-metal RISC-V: plataforma, kernel, build, dispositivos, red, shell, ELF/PSRAM, ejemplos y LVGL. Basada en el árbol <code>/home/daniel/xinu-p4.2</code> (2026-11).</p>
+  <p>Port bare-metal RISC-V: plataforma, kernel, drivers, red, shell, ELF/PSRAM, apps LVGL y herramientas. Estilo manual de usuario (vintage a color). Árbol <code>/home/daniel/xinu-p4.2</code>.</p>
 </header>
 <main>
-  <div class="note">
-    <b>Cómo usar este manual.</b> Es un conjunto de páginas enlazadas (dashboard). Cada sección cita rutas reales del código (<code>system/</code>, <code>loader/</code>, <code>machine/</code>, <code>device/</code>, <code>compile/</code>, <code>examples/</code>) y describe el comportamiento <em>medido/implementado</em> en este port. Complementa al tablero general <a href="../xinu-p4-dashboard.html"><code>docs/xinu-p4-dashboard.html</code></a>.
-  </div>
-  <div class="note warn">
-    <b>Notas vigentes:</b> DMA del LCD (AXI-DMA→SPI2) no estabilizado (queda PIO + fallback); ver <code>docs/README</code>. Íconos del launcher lentos por decode SJPG desde SD: solución recomendada, cache RGB565 en PSRAM o <code>.bin</code> pre-convertido. <code>P4_TIMER_FREQ</code> declarado 360 MHz vs ~320 MHz reales (delays/ticks ~9/8 largos). <code>DEPFLAGS</code> vacío: tras tocar headers/linker, <code>make clean</code>.
-  </div>
+  <div class="note"><b>Actualizado:</b> librerías <code>ui_*</code>/<code>statusbar_*</code> (+ compat), gestos con <b>borde</b> (<code>ev.edge</code>, inferior↑=sistema), <code>/screen.txt</code> (min) ≠ <code>/wifi.txt</code>, iconos <code>icon565.bin</code>/<code>mkicon565.py</code>. Apps nuevas: <b>snake</b> (incremental, D-pad+swipe) y <b>photos</b> galería vintage (fuente <code>/img</code>, rejilla→grande, <code>/img565</code>+<code>thumb</code> via <code>mkphoto565.py</code>). Shell documentada <b>cómo funciona</b> (no solo lista).</div>
+  <div class="note warn"><b>Notas:</b> DMA LCD (AXI-DMA→SPI2) no estabilizado → flush PIO; ver evaluación en §11. Decode SJPG/JPEG en runtime es lento (CPU+SD+PIO): preferir assets preconvertidos. <code>P4_TIMER_FREQ</code> con skew conocido. Tras tocar headers/linker, <code>make clean</code>. FAT: sin truncate al sobreescribir (<code>fl_remove</code> antes), sin <code>fl_rename</code>.</div>
 
   <div class="grid">
-    <article class="card">
-      <span><span class="tag t-hw">Plataforma</span><span class="tag t-core">Arranque</span></span>
-      <h2>01 — Port a ESP32-P4</h2>
-      <p>Machine, RISC-V (RV32IMAFDC, CSRs, CLIC/FPU), capa <code>platform</code>, SBL/loader, arranque de core0/core1, ventanas de memoria y MMU del P4.</p>
-      <a class="btn" href="01-port.html">Abrir sección</a>
-    </article>
-
-    <article class="card">
-      <span><span class="tag t-hw">Hardware</span></span>
-      <h2>02 — Dispositivos (drivers)</h2>
-      <p>Modelo <code>devtab/conf</code>, init/open/read/write/control. UART/tty, GPIO, I2C, touch, power, LCD+SPI2, SD/SDMMC/FAT, audio (ES8311+I2S+DMA), PSRAM.</p>
-      <a class="btn" href="02-devices.html">Abrir sección</a>
-    </article>
-
-    <article class="card">
-      <span><span class="tag t-core">Kernel</span></span>
-      <h2>03 — Kernel en profundidad</h2>
-      <p><code>nulluser/sysinit</code>, hilos (<code>create/ready/resched/ctxsw</code>), planificación, semáforos/monitores/mutex, memoria L2MEM/heap, reloj, interrupciones/traps, bufor pools.</p>
-      <a class="btn" href="03-kernel.html">Abrir sección</a>
-    </article>
-
-    <article class="card">
-      <span><span class="tag t-core">Build</span></span>
-      <h2>04 — Makefile, linker y mapa de memoria</h2>
-      <p><code>compile/Makefile</code> + <code>platformVars</code>, flujo de build/flash (esptool, imágenes), <code>ld.script</code>, XIP, secciones, <code>.audioshare/.sdshare</code>, alias PSRAM 0x48/0x88, banda fantasma L2MEM.</p>
-      <a class="btn" href="04-build-memoria.html">Abrir sección</a>
-    </article>
-
-    <article class="card">
-      <span><span class="tag t-sw">Almacenamiento</span></span>
-      <h2>05 — Sistema de archivos (FAT/microSD)</h2>
-      <p>Cadena SDMMC→sdblock→fat, FatFs/<code>fl_*</code>, montaje, concurrencia (<code>fatLibLock</code>/monitor interno), trampas (no-truncado en overwrite, sin <code>fl_rename</code>), rutas y uso desde apps.</p>
-      <a class="btn" href="05-filesystem.html">Abrir sección</a>
-    </article>
-
-    <article class="card">
-      <span><span class="tag t-hw">Red</span></span>
-      <h2>06 — WiFi y pila de red</h2>
-      <p><code>esp_hosted</code> sobre SDIO con ESP32-C6 (RPC), <code>espeth</code>/ETH0, pila nativa Xinu (ARP/IP/ICMP/UDP/TCP, <code>netif</code>/pool), DHCP, servidores, latencias y limitaciones.</p>
-      <a class="btn" href="06-wifi-red.html">Abrir sección</a>
-    </article>
-
-    <article class="card">
-      <span><span class="tag t-sw">Interfaz</span></span>
-      <h2>07 — Comandos de shell</h2>
-      <p>Modelo de <code>commandtab</code>/<code>xsh_*</code>, arranque de red (<code>netboot</code>), diagnóstico, audio, archivos, ELF (<code>elf</code>) y red/servicios. Comportamiento y uso en profundidad.</p>
-      <a class="btn" href="07-shell.html">Abrir sección</a>
-    </article>
-
-    <article class="card">
-      <span><span class="tag t-core">Ejecución</span></span>
-      <h2>08 — ELF en PSRAM: <code>elfload</code> y <code>exports</code></h2>
-      <p>Formato aceptado (ET_REL RV32), carga/colocación en PSRAM, relocaciones, resolución contra <code>exports</code>, salto por ventana directa, coherencia, <code>exit</code>/vida de la hebra, ABI de la tabla.</p>
-      <a class="btn" href="08-elf.html">Abrir sección</a>
-    </article>
-
-    <article class="card">
-      <span><span class="tag t-app">Apps</span></span>
-      <h2>09 — Ejemplos, launcher y apps ELF</h2>
-      <p>SDK <code>examples/p4-elfsdk</code>, estructura <code>/apps/&lt;app&gt;/</code> (<code>app.elf</code>, <code>icon.jpg</code>, <code>app.txt</code>), mecanismo del launcher, <code>appmgr</code>, ciclo cooperativo y apps (musica, calculadora, flappy, tictac, settings).</p>
-      <a class="btn" href="09-ejemplos-launcher.html">Abrir sección</a>
-    </article>
-
-    <article class="card">
-      <span><span class="tag t-app">UI</span></span>
-      <h2>10 — Manual LVGL en este sistema</h2>
-      <p>Port LVGL v8, <code>lvglui</code>/<code>lvgl_lock</code>/flush, uso desde apps ELF, gestos/eventos, patrón <code>struct ajustes</code>, cómo crear un programa nuevo paso a paso, rendimiento y reglas.</p>
-      <a class="btn" href="10-lvgl.html">Abrir sección</a>
-    </article>
+    <article class="card"><span><span class="tag t2">Plataforma</span><span class="tag t3">Arranque</span></span><h2>01 — Port a ESP32-P4</h2><p>Machine RISC-V (RV32IMAFDC, CLIC/FPU), platform/SBL/loader, core0/core1, memoria.</p><a class="btn" href="manual/01-port.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t2">Hardware</span></span><h2>02 — Dispositivos</h2><p><code>devtab/conf</code>, UART, GPIO, I2C, touch, power, LCD+SPI2, SD/FAT, audio, PSRAM.</p><a class="btn" href="manual/02-devices.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t3">Kernel</span></span><h2>03 — Kernel en profundidad</h2><p>Hilos, <code>create/ready/resched/ctxsw</code>, semáforos, memoria, reloj, IRQ/traps.</p><a class="btn" href="manual/03-kernel.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t3">Build</span></span><h2>04 — Makefile, linker y mapa de memoria</h2><p>Build/flash, <code>ld.script</code>, secciones, PSRAM 0x48/0x88, reservas, heap.</p><a class="btn" href="manual/04-build-memoria.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t">Almacenamiento</span></span><h2>05 — Sistema de archivos</h2><p>SDMMC→fat, <code>fl_*</code>, concurrencia, rutas, trampas (no truncate/rename).</p><a class="btn" href="manual/05-filesystem.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t2">Red</span></span><h2>06 — WiFi y red</h2><p>esp_hosted/SDIO+C6, ETH0, pila Xinu, DHCP, límites. <code>/wifi.txt</code>.</p><a class="btn" href="manual/06-wifi-red.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t">Interfaz</span></span><h2>07 — Shell</h2><p><b>Cómo funciona</b> la shell (REPL, <code>commandtab</code>, <code>fsutil</code>) y cómo opera cada comando: archivos (<code>fl_*</code>), <code>elf/elf_run</code>, WiFi/RPC, TCP/HTTP/telnet, dispositivos (<code>devtab/control</code>), audio.</p><a class="btn" href="manual/07-shell.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t3">Ejecución</span></span><h2>08 — ELF en PSRAM: <code>elfload</code> y <code>exports</code></h2><p>ET_REL RV32, relocaciones, resolución contra exports, caché, vida de la hebra.</p><a class="btn" href="manual/08-elf.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t4">Apps</span></span><h2>09 — Ejemplos, launcher y apps ELF</h2><p>SDK, <code>/apps</code>/<code>app.txt</code>, launcher, <code>appmgr</code> y <b>apps nuevas</b>: <code>snake</code> (dibujo incremental, D-pad+swipe) y <code>photos</code> galería (grid+grande, fuente <code>/img</code>, <code>.565</code>/thumb, vintage) — cómo se hicieron y API <code>ui_*</code>.</p><a class="btn" href="manual/09-ejemplos-launcher.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t4">UI</span></span><h2>10 — LVGL en este sistema</h2><p>Modelo <code>lvglui</code>, <code>lvgl_lock</code>, flush/touch, color 16bpp.</p><a class="btn" href="manual/10-lvgl.html">Abrir</a></article>
+    <article class="card"><span><span class="tag t4">Guía</span></span><h2>11 — Cómo se hacen los ELF y LVGL (apps)</h2><p>Cómo se hacen los ELF, <b>cómo funciona la API nueva</b> (<code>ui_*</code>/<code>statusbar_*</code>, <code>edge</code>, <code>appmgr</code>, LVGL/lock), apps <code>snake</code>/<code>photos</code> (arquitectura y pipeline <code>.565</code>), receta y rendimiento/DMA.</p><a class="btn" href="manual/11-app-dev.html">Abrir</a></article>
   </div>
+
+  <h3>Hoja de ruta / futuro</h3>
+  <ul>
+    <li><b>DMA LCD:</b> reintento AXI-DMA→SPI2 con descriptores en PSRAM (alias coherente 0x48/0x88 + fence), caso mínimo; hoy PIO estable.</li>
+    <li><b>Apps “tablet/teléfono”:</b> visor de fotos rápido (assets .565/escala por tiras), galería de animales con audio del nombre (TTS), reloj, explorador archivos, monitor sistema. <code>snake</code>/<code>photos</code> son starters.</li>
+    <li><b>Audio/voz (a evaluar/portar):</b> TinyTTS (decir nombre del animal), TinySTT — port C++/deps/modelos, memoria PSRAM.</li>
+    <li><b>Bootloader/actualización:</b> bootloader que detecte imagen Xinu en SD, la flashee y salte (estilo xinu-s3-amp); actualización por UDP + loader escribe flash.</li>
+    <li><b>Kernel:</b> capa de abstracción/desacople mientras se ajusta el núcleo (núcleo funcional, cambios en curso).</li>
+    <li><b>BLE (C6/NimBLE) / TinyUSB MSC / dual-core worker / overclock:</b> ver evaluación (dependen de hosted-SDIO, pads/consola, SMP-safety y clocks).</li>
+  </ul>
 </main>
-<footer>Manual generado a partir del código de <code>xinu-p4.2</code>. Ver también <a href="../xinu-p4-dashboard.html">tablero</a> y <a href="../README">docs/README</a>.</footer>
 </body>
 </html>

@@ -1,0 +1,4 @@
+name=Photos
+exec=/apps/photos/app.elf
+icon=S:/apps/photos/icon.jpg
+color=0x2f7d6d

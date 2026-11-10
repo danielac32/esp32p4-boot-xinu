@@ -166,7 +166,7 @@ static void show_out_status(int audiofd)
 #define AUDIO_PLAY_OUT_BYTES    4096U
 #define AUDIO_PLAY_IN_BYTES     (AUDIO_PLAY_OUT_BYTES / 2U)
 #define AUDIO_REC_CHUNK_BYTES   4096U
-#define AUDIO_REC_MAX_MS        30000U
+#define AUDIO_REC_MAX_MS        20000U
 #define AUDIO_SEC_MS            1000U
 
 /* Lo que cabe en el anillo de captura del driver (32 trozos de 512 tramas) son
@@ -182,8 +182,8 @@ static uint8_t playOut[AUDIO_PLAY_OUT_BYTES];
 
 static void show_in_status(int audiofd);
 
-/* Lo que capta el micro se queda en PSRAM entre el rec y el loop: 30 s son
- * 5,76 MB, y el heap de PSRAM tiene los 31 MB del chip menos lo que ocupan los
+/* Lo que capta el micro se queda en PSRAM entre el rec y el loop: 20 s son
+ * 3,84 MB, y el heap de PSRAM tiene los 31 MB del chip menos lo que ocupan los
  * anillos de las dos etapas.
  *
  * El buffer se maneja por el acceso directo del CPU (0x88......), no por la

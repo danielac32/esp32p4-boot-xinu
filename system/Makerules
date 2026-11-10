@@ -48,6 +48,10 @@ C_FILES += sysent.c
 # y a las ~1.000 funciones de LVGL que aun no llama nadie.
 C_FILES += exports.c
 
+# Monitor de tareas para apps ELF (include/taskmon.h): una llamada por
+# refresco, sin reserva de memoria, expuesta por exports.c.
+C_FILES += taskmon.c
+
 # Cargador de apps ELF (include/elfload.h): coloca un ET_REL RV32 en PSRAM,
 # resuelve contra la tabla de arriba y salta a su '_start' con argc/argv.
 # Tambien del kernel: 'elf' (shell/xsh_elf.c) es el cliente, y el cargador

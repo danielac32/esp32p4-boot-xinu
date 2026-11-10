@@ -183,12 +183,12 @@ int mp3_abrir(const char *ruta)
     unsigned tam;
     int n;
 
-    fs_lock();
+    
     mp3_cerrar_nolock();
 
     if (NULL == ruta)
     {
-        fs_unlock();
+        
         return SYSERR;
     }
     if (NULL == dec)
@@ -200,7 +200,7 @@ int mp3_abrir(const char *ruta)
         if (NULL == dec || NULL == pcm || NULL == inbuf)
         {
             mp3_cerrar_nolock();
-            fs_unlock();
+            
             return SYSERR;
         }
     }
@@ -208,7 +208,7 @@ int mp3_abrir(const char *ruta)
     fich = fl_fopen(ruta, "r");
     if (NULL == fich)
     {
-        fs_unlock();
+        
         return SYSERR;
     }
 
@@ -256,11 +256,11 @@ int mp3_abrir(const char *ruta)
     if (n <= 0)
     {
         mp3_cerrar_nolock();
-        fs_unlock();
+        
         return SYSERR;
     }
     n = mp3_rebobinar_nolock();
-    fs_unlock();
+    
     return n;
 }
 
@@ -315,17 +315,17 @@ static void mp3_cerrar_nolock(void)
 int mp3_rebobinar(void)
 {
     int r;
-    fs_lock();
+    
     r = mp3_rebobinar_nolock();
-    fs_unlock();
+    
     return r;
 }
 
 void mp3_cerrar(void)
 {
-    fs_lock();
+    
     mp3_cerrar_nolock();
-    fs_unlock();
+    
 }
 
 int mp3_hz(void)      { return hz; }
@@ -354,9 +354,9 @@ int mp3_leer(short *dst, int frames)
             /* Solo se bloquea el FS durante la lectura/decodificacion del
              * fichero; el remuestreo de salida no toca el FS (evita entrecortes
              * cuando otra hebra, p. ej. elf_run, lee la SD). */
-            fs_lock();
+            
             n = decodificar();
-            fs_unlock();
+            
 
             if (n <= 0)
             {

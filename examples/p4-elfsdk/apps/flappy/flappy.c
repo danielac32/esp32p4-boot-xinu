@@ -100,7 +100,7 @@ struct flit
 
 struct flappy
 {
-    gestos_t *g;
+    ui_input_t *g;
     int estado;
     int bird_y;
     int bird_vy;
@@ -235,7 +235,7 @@ static void fin(struct flappy *m)
     /* La nota de la libreria vive en y=250, justo donde cae GAME OVER: se quita
      * para que los dos rotulos no se pisen.  pintar() enseña el GAME OVER en
      * cuanto ve el estado FIN (no se toca aqui para no anidar lvgl_lock). */
-    gestos_nota(m->g, "");
+    ui_set_note(m->g, "");
 }
 
 /* ---- reiniciar / flap ----------------------------------------------------- */
@@ -256,7 +256,7 @@ static void reiniciar(struct flappy *m)
         p->x = ANCHO + 30 + i * PASO_PIPE;
         spawn(m, i);
     }
-    gestos_nota(m->g, "TOQUE PARA VOLAR");
+    ui_set_note(m->g, "TOQUE PARA VOLAR");
 }
 
 static void dar_flap(struct flappy *m)
@@ -271,7 +271,7 @@ static void dar_flap(struct flappy *m)
      * del juego; reiniciar() la vuelve a poner. */
     if (ESTADO_LISTO == m->estado)
     {
-        gestos_nota(m->g, "");
+        ui_set_note(m->g, "");
     }
     m->estado = ESTADO_CORRIENDO;
     m->bird_vy = -V_FLAP;
@@ -353,7 +353,7 @@ static void tick(struct flappy *m)
 
 static void crear(struct flappy *m)
 {
-    lv_obj_t *raiz = gestos_raiz(m->g);
+    lv_obj_t *raiz = ui_root(m->g);
     int i;
 
     lvgl_lock();
@@ -445,9 +445,9 @@ static void crear(struct flappy *m)
 
 static void botones(struct flappy *m)
 {
-    m->t_reiniciar = gestos_boton(m->g, ID_REINICIAR, "JUGAR", X_JUGAR, Y_JUGAR,
+    m->t_reiniciar = ui_button(m->g, ID_REINICIAR, "JUGAR", X_JUGAR, Y_JUGAR,
                                  AN_JUGAR, AL_JUGAR, C_AMBER);
-    m->t_salir = gestos_boton(m->g, ID_SALIR, "X", X_SALIR, Y_SALIR,
+    m->t_salir = ui_button(m->g, ID_SALIR, "X", X_SALIR, Y_SALIR,
                               AN_SALIR, AL_SALIR, C_AMBER);
 }
 
@@ -459,27 +459,27 @@ static void salir(struct flappy *m)
     {
         appmgr_unregister(m->slot);
     }
-    gestos_cerrar(m->g);
+    ui_destroy(m->g);
     psram_free(m);
 }
 
 static void ir_fondo(struct flappy *m, int *fuera)
 {
-    gev_t ev;
+    ui_event_t ev;
     int s;
 
     if (m->slot < 0)
     {
         return;
     }
-    gestos_show(m->g, 0);
+    ui_show(m->g, 0);
     appmgr_set_state(m->slot, APP_BACKGROUND);
     while (!*fuera)
     {
         s = appmgr_get_state(m->slot);
         if (APP_RUNNING == s)
         {
-            gestos_show(m->g, 1);
+            ui_show(m->g, 1);
             m->ultimo_tick = millis();
             return;
         }
@@ -488,7 +488,7 @@ static void ir_fondo(struct flappy *m, int *fuera)
             *fuera = 1;
             return;
         }
-        while (gestos_leer(m->g, &ev))
+        while (ui_poll(m->g, &ev))
         {
             ;
         }
@@ -498,26 +498,26 @@ static void ir_fondo(struct flappy *m, int *fuera)
 
 /* ---- eventos -------------------------------------------------------------- */
 
-static void procesar(struct flappy *m, gev_t *ev, int *fuera)
+static void procesar(struct flappy *m, ui_event_t *ev, int *fuera)
 {
 #ifdef PRUEBA_AUTO
     printf("ev: tipo=%d dir=%d id=%d x=%d y=%d\r\n", ev->tipo, ev->dir, ev->id,
            ev->x1, ev->y1);
 #endif
-    if (GE_ARRASTRE == ev->tipo)
+    if (UI_EVENT_SWIPE == ev->tipo)
     {
-        if (GE_ARRIBA == ev->dir)
+        if (UI_EDGE_BOTTOM == ev->edge && UI_DIR_UP == ev->dir)
         {
             ir_fondo(m, fuera);
         }
         return;
     }
-    if (GE_TOQUE == ev->tipo || GE_LARGA == ev->tipo)
+    if (UI_EVENT_TAP == ev->tipo || UI_EVENT_LONG_PRESS == ev->tipo)
     {
         dar_flap(m);
         return;
     }
-    if (GE_BOTON != ev->tipo)
+    if (UI_EVENT_BUTTON != ev->tipo)
     {
         return;
     }
@@ -537,7 +537,7 @@ static void procesar(struct flappy *m, gev_t *ev, int *fuera)
 int main(int argc, char *argv[])
 {
     struct flappy *m;
-    gev_t ev;
+    ui_event_t ev;
     int fuera = 0;
 #ifdef PRUEBA_AUTO
     unsigned t_auto = millis();
@@ -558,7 +558,7 @@ int main(int argc, char *argv[])
     m->ultimo_tick = millis();
     m->slot = SYSERR;
 
-    m->g = gestos_nueva_partes(GE_NOTA);
+    m->g = ui_create_ex(UI_CHROME_NOTE);
     if (NULL == m->g)
     {
         psram_free(m);
@@ -578,11 +578,11 @@ int main(int argc, char *argv[])
     crear(m);
     botones(m);
     /* La nota es lo unico que usa este juego; la pastilla y la flecha sobran. */
-    gestos_nota(m->g, "TOQUE PARA VOLAR");
+    ui_set_note(m->g, "TOQUE PARA VOLAR");
 
     while (!fuera)
     {
-        while (gestos_leer(m->g, &ev))
+        while (ui_poll(m->g, &ev))
         {
             procesar(m, &ev, &fuera);
             if (fuera)
@@ -601,10 +601,10 @@ int main(int argc, char *argv[])
             t_auto = millis();
             if (ESTADO_LISTO == m->estado)
             {
-                gev_t falso;
+                ui_event_t falso;
 
                 memset(&falso, 0, sizeof(falso));
-                falso.tipo = GE_BOTON;
+                falso.tipo = UI_EVENT_BUTTON;
                 falso.id = ID_REINICIAR;
                 printf("auto: pulsar JUGAR\r\n");
                 procesar(m, &falso, &fuera);
@@ -642,7 +642,7 @@ int main(int argc, char *argv[])
         sleep(30);
     }
 
-    salir(m);           /* gestos_cerrar() y psram_free(m); no volver a liberar */
+    salir(m);           /* ui_destroy() y psram_free(m); no volver a liberar */
     exit(0);
     return 0;
 }

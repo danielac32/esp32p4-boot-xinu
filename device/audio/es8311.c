@@ -253,42 +253,24 @@ static const struct coeff *coeff_find(uint32_t mclk_hz, uint32_t rate_hz)
 /**
  * @ingroup audio
  *
- * Pone el codec en el ajuste de ES8311_MCLK_HZ / ES8311_SAMPLE_RATE_HZ:
- * reset de bloques, enable, divisores de reloj, formato de 16 bits y los
- * registros de sistema de la referencia.
+ * Reaplicar el reparto de relojes, el formato serie y la potencia de los dos
+ * conversores.  Es idempotente: escribe los mismos valores que dejo el init.
  *
- * El reloj que se configura es el que se le pedira al I2S mas adelante.  Sin
- * I2S el codec no tiene MCLK y no suena nada, pero los registros quedan
- * escritos y se pueden leer de vuelta: esa es la prueba de esta etapa.
+ * Hace falta repetirlo al abrir el micro porque el ES8311 pierde el estado del
+ * ADC cuando se para el MCLK (la salida lo para al cerrarse) y entonces una
+ * captura puede salir a cero exacto de forma intermitente: con el mismo codigo
+ * la toma iba o no iba segun lo que hubiera sonado antes.  No se toca el
+ * volumen (0x32) ni el mute (0x31) del DAC, asi que no altera lo que suene.
  *
- * @return true si el codec contesta a todas las transacciones
+ * @return true si el codec acepto todas las escrituras
  */
-bool es8311_init(void)
+static bool es8311_apply_config(void)
 {
     const struct coeff *coeff;
     uint8_t reg06;
 
-    codec = false;
-
-    if (OK != control(I2C0, I2C_CTRL_PROBE, ES8311_ADDR0, 0))
-    {
-        return false;
-    }
-
     coeff = coeff_find(ES8311_MCLK_HZ, ES8311_SAMPLE_RATE_HZ);
     if (coeff == NULL)
-    {
-        return false;
-    }
-
-    /* Reset: 0x1F reinicia todos los bloques, 0x00 los suelta y 0x80
-     * habilita el chip.  Los 20 ms vienen del driver de referencia. */
-    if (!reg_write(ES_REG_RESET, 0x1FU))
-    {
-        return false;
-    }
-    mdelay(20);
-    if (!reg_write(ES_REG_RESET, 0x00U) || !reg_write(ES_REG_RESET, 0x80U))
     {
         return false;
     }
@@ -342,6 +324,53 @@ bool es8311_init(void)
         !reg_write(ES_REG_SYS13, 0x10U) ||
         !reg_write(ES_REG_ADC1C, 0x6AU) ||
         !reg_write(ES_REG_DAC37, 0x08U))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @ingroup audio
+ *
+ * Pone el codec en el ajuste de ES8311_MCLK_HZ / ES8311_SAMPLE_RATE_HZ:
+ * reset de bloques, enable, divisores de reloj, formato de 16 bits y los
+ * registros de sistema de la referencia.
+ *
+ * El reloj que se configura es el que se le pedira al I2S mas adelante.  Sin
+ * I2S el codec no tiene MCLK y no suena nada, pero los registros quedan
+ * escritos y se pueden leer de vuelta: esa es la prueba de esta etapa.
+ *
+ * @return true si el codec contesta a todas las transacciones
+ */
+bool es8311_init(void)
+{
+    codec = false;
+
+    if (OK != control(I2C0, I2C_CTRL_PROBE, ES8311_ADDR0, 0))
+    {
+        return false;
+    }
+
+    if (coeff_find(ES8311_MCLK_HZ, ES8311_SAMPLE_RATE_HZ) == NULL)
+    {
+        return false;
+    }
+
+    /* Reset: 0x1F reinicia todos los bloques, 0x00 los suelta y 0x80
+     * habilita el chip.  Los 20 ms vienen del driver de referencia. */
+    if (!reg_write(ES_REG_RESET, 0x1FU))
+    {
+        return false;
+    }
+    mdelay(20);
+    if (!reg_write(ES_REG_RESET, 0x00U) || !reg_write(ES_REG_RESET, 0x80U))
+    {
+        return false;
+    }
+
+    if (!es8311_apply_config())
     {
         return false;
     }

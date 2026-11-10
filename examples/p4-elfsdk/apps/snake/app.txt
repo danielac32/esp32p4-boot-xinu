@@ -1,0 +1,4 @@
+name=Snake
+exec=/apps/snake/app.elf
+icon=S:/apps/snake/icon.jpg
+color=0x4f7d3a

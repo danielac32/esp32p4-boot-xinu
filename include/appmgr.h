@@ -17,7 +17,7 @@
 
 #include <kernel.h>
 
-#define APPMGR_MAX     8
+#define APPMGR_MAX     12
 
 #define APP_FREE       0
 #define APP_RUNNING    1

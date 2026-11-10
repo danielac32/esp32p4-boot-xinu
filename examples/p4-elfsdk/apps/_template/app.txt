@@ -1,0 +1,4 @@
+name=MyApp
+exec=/apps/myapp/app.elf
+icon=S:/apps/myapp/icon.jpg
+color=0x4f7d3a

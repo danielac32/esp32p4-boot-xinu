@@ -48,20 +48,24 @@ extern int wifiSignalQuality(int32 rssi);
 /* ---- constantes de la app ------------------------------------------------ */
 
 #define FICHERO    "/wifi.txt"
+#define SCREEN_FILE "/screen.txt"
+#define SCREEN_DEFAULT_MIN 2
 
 #define P_MENU     0
 #define P_WIFI     1
 #define P_CLAVE    2
+#define P_TIMEOUT  3
 
 #define ID_WIFI     1
 #define ID_TIEMPO   2
 #define ID_APAGAR   3
 #define ID_RED      10          /* 10 .. 10+WIFI_REDES_MAX-1                  */
 #define ID_BUSCAR   20
-#define ID_ATRAS_W  21
 #define ID_CONECTAR 30
-#define ID_ATRAS_C  31
 #define ID_BORRAR   32
+#define ID_TMENOS   50
+#define ID_TMAS     51
+#define ID_TGUARDAR 52
 #define ID_SALIR    40
 
 #define LISTA_MAX  16           /* redes que se muestran (con scroll)         */
@@ -75,10 +79,11 @@ extern int wifiSignalQuality(int32 rssi);
 
 struct ajustes
 {
-    gestos_t *g;
+    ui_input_t *g;
     int pantalla;               /* P_*                                         */
     int nredes;                 /* -1 mientras se busca; 0..MAX despues        */
     int error;                  /* el ultimo escaneo no se pudo hacer          */
+    int screen_min;             /* timeout pantalla, minutos                   */
     struct wifi_red redes[LISTA_MAX];
     char ssid[WIFI_RED_SSID];   /* red elegida                                 */
     char texto[80];             /* buffer de snprintf                          */
@@ -90,6 +95,7 @@ struct ajustes
     lv_obj_t *campo;            /* lv_textarea de la clave                     */
     lv_obj_t *tecla;            /* lv_keyboard                                 */
     lv_obj_t *lista;            /* contenedor con scroll de la lista WiFi      */
+    lv_obj_t *tnum;             /* numero grande de screen timeout             */
     int slot;
 };
 
@@ -118,12 +124,12 @@ static void crear_marco(struct ajustes *m)
 {
     lvgl_lock();
 
-    m->titulo = lv_label_create(gestos_raiz(m->g));
+    m->titulo = lv_label_create(ui_root(m->g));
     lv_label_set_text(m->titulo, "SETTINGS");
     lv_obj_set_style_text_color(m->titulo, lv_color_hex(C_TEXTO), 0);
     lv_obj_align(m->titulo, LV_ALIGN_TOP_LEFT, 10, 8);
 
-    m->estado = lv_label_create(gestos_raiz(m->g));
+    m->estado = lv_label_create(ui_root(m->g));
     lv_label_set_text(m->estado, "");
     lv_obj_set_style_text_color(m->estado, lv_color_hex(C_ESTADO), 0);
     lv_obj_align(m->estado, LV_ALIGN_TOP_LEFT, 10, 40);
@@ -156,6 +162,53 @@ static void ip_actual(char *dst, int cap)
 }
 
 /* ---- /wifi.txt ----------------------------------------------------------- */
+
+static int leer_fichero(struct ajustes *m);
+
+/** Lee el primer SSID de /wifi.txt en dst. Devuelve 1 si hay alguno. */
+static int ssid_guardado(struct ajustes *m, char *dst, int cap)
+{
+    char *p;
+    char *sep;
+    char *fin;
+    int l;
+
+    dst[0] = '\0';
+    leer_fichero(m);
+    p = m->fichero;
+    while ('\0' != *p)
+    {
+        fin = strchr(p, '\n');
+        l = (NULL != fin) ? (int)(fin - p) : (int)strlen(p);
+        if (l > 0 && '\r' == p[l - 1])
+        {
+            l--;
+        }
+        if (l > 0 && '#' != p[0])
+        {
+            sep = memchr(p, ';', (size_t)l);
+            if (NULL != sep && sep != p)
+            {
+                int sl = (int)(sep - p);
+
+                if (sl >= cap)
+                {
+                    sl = cap - 1;
+                }
+                memcpy(dst, p, (size_t)sl);
+                dst[sl] = '\0';
+                return 1;
+            }
+        }
+        if (NULL == fin)
+        {
+            break;
+        }
+        p = fin + 1;
+    }
+    return 0;
+}
+
 
 /** Lee el fichero entero en m->fichero.  Devuelve los bytes leidos. */
 static int leer_fichero(struct ajustes *m)
@@ -322,6 +375,98 @@ static int primera_red_fichero(struct ajustes *m, char *ssid, char *clave)
 }
 #endif
 
+static void cerrar_clave(struct ajustes *m);
+static void cerrar_lista(struct ajustes *m);
+
+/* ---- screen timeout (/screen.txt) --------------------------------------- */
+
+static void leer_timeout(struct ajustes *m)
+{
+    void *f;
+    char buf[16];
+    int n, i = 0, v = 0;
+
+    m->screen_min = SCREEN_DEFAULT_MIN;
+    f = fl_fopen(SCREEN_FILE, "r");
+    if (NULL != f)
+    {
+        n = fl_fread(buf, 1, (int)sizeof(buf) - 1, f);
+        fl_fclose(f);
+        if (n > 0)
+        {
+            buf[n] = '\0';
+            while (buf[i] == ' ' || buf[i] == '\r' || buf[i] == '\n') i++;
+            while (buf[i] >= '0' && buf[i] <= '9') { v = v * 10 + (buf[i] - '0'); i++; }
+            if (v > 0) m->screen_min = v;
+        }
+    }
+    if (m->screen_min < 1) m->screen_min = 1;
+    if (m->screen_min > 120) m->screen_min = 120;
+}
+
+static void guardar_timeout(struct ajustes *m)
+{
+    void *f;
+    char buf[16];
+
+    if (m->screen_min < 1) m->screen_min = 1;
+    if (m->screen_min > 120) m->screen_min = 120;
+    snprintf(buf, sizeof(buf), "%d\n", m->screen_min);
+    /* FAT: sin truncate al sobreescribir -> remove antes de write. */
+    fl_remove(SCREEN_FILE);
+    f = fl_fopen(SCREEN_FILE, "w");
+    if (NULL == f)
+    {
+        poner_estado(m, "No se pudo guardar screen.txt");
+        return;
+    }
+    fl_fwrite(buf, 1, (int)strlen(buf), f);
+    fl_fclose(f);
+    snprintf(m->texto, sizeof(m->texto), "Guardado: %d min", m->screen_min);
+    poner_estado(m, m->texto);
+}
+
+static void cerrar_tnum(struct ajustes *m);
+
+static void mostrar_timeout(struct ajustes *m)
+{
+    snprintf(m->texto, sizeof(m->texto), "%d min", m->screen_min);
+    poner_estado(m, "Tiempo de apagado por inactividad");
+    if (NULL != m->tnum)
+    {
+        lvgl_lock();
+        lv_label_set_text(m->tnum, m->texto);
+        lvgl_unlock();
+    }
+}
+
+static void pantalla_timeout(struct ajustes *m)
+{
+    m->pantalla = P_TIMEOUT;
+    ui_buttons_clear(m->g);
+    cerrar_clave(m);
+    cerrar_lista(m);
+    cerrar_tnum(m);
+
+    leer_timeout(m);
+    poner_titulo(m, "Tiempo de pantalla");
+
+    lvgl_lock();
+    m->tnum = lv_label_create(ui_root(m->g));
+    lv_obj_set_style_text_color(m->tnum, lv_color_hex(C_TEXTO), 0);
+    lv_obj_set_width(m->tnum, 320);
+    lv_obj_set_style_text_align(m->tnum, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(m->tnum, LV_ALIGN_TOP_MID, 0, 150);
+    lvgl_unlock();
+
+    mostrar_timeout(m);
+
+    ui_button(m->g, ID_TMENOS, "-", 40, 210, 90, 70, C_BOTON);
+    ui_button(m->g, ID_TMAS, "+", 190, 210, 90, 70, C_BOTON);
+    ui_button(m->g, ID_TGUARDAR, "Guardar", 70, 310, 180, 52, C_ACCION);
+    ui_button(m->g, ID_SALIR, "X", 276, 6, 36, 32, C_BOTON);
+}
+
 /* ---- pantallas ----------------------------------------------------------- */
 
 /** Borra el teclado y el campo de texto, si estaban. */
@@ -344,7 +489,7 @@ static void cerrar_clave(struct ajustes *m)
 
 static void cerrar_lista(struct ajustes *m)
 {
-    /* El contenedor lo borra el llamador DESPUES de gestos_botones_limpiar():
+    /* El contenedor lo borra el llamador DESPUES de ui_buttons_clear():
      * asi las filas (hijas rastreadas) ya se quitaron del tracker y no quedan
      * punteros colgando.  Aqui solo se va el contenedor vacio. */
     if (NULL != m->lista)
@@ -356,26 +501,60 @@ static void cerrar_lista(struct ajustes *m)
     }
 }
 
+static void cerrar_tnum(struct ajustes *m)
+{
+    if (NULL != m->tnum)
+    {
+        lvgl_lock();
+        lv_obj_del(m->tnum);
+        m->tnum = NULL;
+        lvgl_unlock();
+    }
+}
+
 static void pantalla_menu(struct ajustes *m)
 {
     char ip[32];
+    char ssid[WIFI_RED_SSID];
+    int hay_red;
 
     m->pantalla = P_MENU;
-    gestos_botones_limpiar(m->g);
+    ui_buttons_clear(m->g);
     cerrar_clave(m);
     cerrar_lista(m);
+    cerrar_tnum(m);
 
-    poner_titulo(m, "SETTINGS");
+    poner_titulo(m, "Ajustes");
     ip_actual(ip, sizeof(ip));
-    snprintf(m->texto, sizeof(m->texto), "WiFi: %s", ip);
+    hay_red = ssid_guardado(m, ssid, sizeof(ssid));
+    if (0 == strcmp(ip, "sin red") || 0 == strcmp(ip, "sin IP"))
+    {
+        if (hay_red)
+        {
+            snprintf(m->texto, sizeof(m->texto), "WiFi: %s (sin conexion)", ssid);
+        }
+        else
+        {
+            snprintf(m->texto, sizeof(m->texto), "WiFi: sin red");
+        }
+    }
+    else
+    {
+        if (hay_red)
+        {
+            snprintf(m->texto, sizeof(m->texto), "WiFi: %s  %s", ssid, ip);
+        }
+        else
+        {
+            snprintf(m->texto, sizeof(m->texto), "WiFi: %s", ip);
+        }
+    }
     poner_estado(m, m->texto);
 
-    gestos_boton(m->g, ID_WIFI, "WiFi", 20, 110, 280, 56, C_ACCION);
-    gestos_boton(m->g, ID_TIEMPO, "Screen timeout", 20, 178, 280, 56, C_BOTON);
-    /* El driver del PMIC es solo lectura a proposito (escribir 0x10/los rails
-     * puede tumbar la placa): el boton avisa en vez de apagar de verdad. */
-    gestos_boton(m->g, ID_APAGAR, "Power off", 20, 246, 280, 56, 0xC0392B);
-    gestos_boton(m->g, ID_SALIR, "X", 276, 6, 36, 32, C_BOTON);
+    ui_button(m->g, ID_WIFI, "WiFi", 20, 110, 280, 56, C_ACCION);
+    ui_button(m->g, ID_TIEMPO, "Tiempo de pantalla", 20, 178, 280, 56, C_BOTON);
+    ui_button(m->g, ID_APAGAR, "Apagar", 20, 246, 280, 56, 0xC0392B);
+    ui_button(m->g, ID_SALIR, "X", 276, 6, 36, 32, C_BOTON);
 }
 
 /** Nombre de la fila i: SSID recortado y, si hay RSSI, el porcentaje. */
@@ -403,40 +582,66 @@ static void pantalla_wifi(struct ajustes *m)
     int i;
 
     m->pantalla = P_WIFI;
-    gestos_botones_limpiar(m->g);
+    ui_buttons_clear(m->g);
     cerrar_clave(m);
     cerrar_lista(m);
+    cerrar_tnum(m);
 
     poner_titulo(m, "WiFi");
+    ip_actual(ip, sizeof(ip));
     if (m->error)
     {
-        poner_estado(m, "Scan failed");
+        char ssid[WIFI_RED_SSID];
+
+        if (ssid_guardado(m, ssid, sizeof(ssid)))
+        {
+            snprintf(m->texto, sizeof(m->texto), "Error scan  (guardada: %s)", ssid);
+        }
+        else
+        {
+            snprintf(m->texto, sizeof(m->texto), "Error al buscar redes");
+        }
+        poner_estado(m, m->texto);
     }
     else if (m->nredes < 0)
     {
-        poner_estado(m, "Scanning...");
+        poner_estado(m, "Buscando redes...");
     }
     else if (0 == m->nredes)
     {
-        poner_estado(m, "No networks found");
+        poner_estado(m, "No se encontraron redes");
     }
     else
     {
-        ip_actual(ip, sizeof(ip));
-        snprintf(m->texto, sizeof(m->texto), "%d network(s)  %s", m->nredes, ip);
+        char ssid[WIFI_RED_SSID];
+
+        if (ssid_guardado(m, ssid, sizeof(ssid))
+            && 0 != strcmp(ip, "sin red") && 0 != strcmp(ip, "sin IP"))
+        {
+            snprintf(m->texto, sizeof(m->texto), "%d redes  conectado: %s",
+                     m->nredes, ssid);
+        }
+        else if (ssid_guardado(m, ssid, sizeof(ssid)))
+        {
+            snprintf(m->texto, sizeof(m->texto), "%d redes  guardada: %s",
+                     m->nredes, ssid);
+        }
+        else
+        {
+            snprintf(m->texto, sizeof(m->texto), "%d redes  %s", m->nredes, ip);
+        }
         poner_estado(m, m->texto);
     }
 
-    gestos_boton(m->g, ID_BUSCAR, "Scan", 10, 76, 180, 40, C_ACCION);
-    gestos_boton(m->g, ID_ATRAS_W, "Back", 200, 76, 110, 40, C_BOTON);
-    gestos_boton(m->g, ID_SALIR, "X", 276, 6, 36, 32, C_BOTON);
+    ui_button(m->g, ID_BUSCAR, "Buscar redes", 10, 76, 300, 40, C_ACCION);
+    ui_button(m->g, ID_SALIR, "X", 276, 6, 36, 32, C_BOTON);
 
     /* Lista con scroll: viewport fijo y filas dentro.  Los botones se cuelgan
-     * del contenedor (gestos_boton_en) para que el id siga llegando al anillo. */
+     * del contenedor (ui_button_on) para que el id siga llegando al anillo. */
     if (m->nredes > 0)
     {
         lvgl_lock();
-        m->lista = lv_obj_create(gestos_raiz(m->g));
+        m->lista = lv_obj_create(ui_root(m->g));
         lv_obj_set_size(m->lista, 304, 344);
         lv_obj_set_pos(m->lista, 8, 126);
         lv_obj_set_style_bg_opa(m->lista, LV_OPA_TRANSP, 0);
@@ -448,7 +653,7 @@ static void pantalla_wifi(struct ajustes *m)
         for (i = 0; i < m->nredes && i < FILAS; i++)
         {
             texto_fila(m, i, fila, sizeof(fila));
-            gestos_boton_en(m->g, ID_RED + i, fila, m->lista,
+            ui_button_on(m->g, ID_RED + i, fila, m->lista,
                             2, i * 42, 296, 38, C_FILA);
         }
     }
@@ -461,11 +666,12 @@ static void pantalla_clave(struct ajustes *m)
     char buf[64];
 
     m->pantalla = P_CLAVE;
-    gestos_botones_limpiar(m->g);
+    ui_buttons_clear(m->g);
     cerrar_clave(m);
     cerrar_lista(m);
+    cerrar_tnum(m);
 
-    poner_titulo(m, "Password");
+    poner_titulo(m, "Clave WiFi");
     snprintf(buf, sizeof(buf), "Network: %s", m->ssid);
     if (strlen(buf) > 36)
     {
@@ -474,7 +680,7 @@ static void pantalla_clave(struct ajustes *m)
     poner_estado(m, buf);
 
     lvgl_lock();
-    m->campo = lv_textarea_create(gestos_raiz(m->g));
+    m->campo = lv_textarea_create(ui_root(m->g));
     lv_obj_set_align(m->campo, LV_ALIGN_TOP_LEFT);
     lv_obj_set_pos(m->campo, 10, 72);
     lv_obj_set_size(m->campo, 300, 44);
@@ -483,18 +689,16 @@ static void pantalla_clave(struct ajustes *m)
     lv_textarea_set_text(m->campo, "");
     /* Sin set_password_mode(): la clave se ve, que es lo que se pidio. */
 
-    m->tecla = lv_keyboard_create(gestos_raiz(m->g));
+    m->tecla = lv_keyboard_create(ui_root(m->g));
     lv_obj_set_size(m->tecla, 320, 230);
     lv_obj_align(m->tecla, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_keyboard_set_mode(m->tecla, LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(m->tecla, m->campo);
     lvgl_unlock();
 
-    /* Dos filas encima del teclado: los tres botones no cabian en una. */
-    gestos_boton(m->g, ID_CONECTAR, "Connect", 8, 122, 304, 42, C_ACCION);
-    gestos_boton(m->g, ID_BORRAR, "Clear", 8, 168, 148, 38, C_BOTON);
-    gestos_boton(m->g, ID_ATRAS_C, "Back", 164, 168, 148, 38, C_BOTON);
-    gestos_boton(m->g, ID_SALIR, "X", 276, 6, 36, 32, C_BOTON);
+    ui_button(m->g, ID_CONECTAR, "Conectar", 8, 122, 304, 42, C_ACCION);
+    ui_button(m->g, ID_BORRAR, "Borrar", 8, 168, 304, 38, C_BOTON);
+    ui_button(m->g, ID_SALIR, "X", 276, 6, 36, 32, C_BOTON);
 }
 
 /* ---- acciones ------------------------------------------------------------ */
@@ -592,17 +796,32 @@ static void conectar_campo(struct ajustes *m)
 
 static void ir_fondo(struct ajustes *m, int *fuera);
 
-static void procesar(struct ajustes *m, gev_t *ev, int *fuera)
+static void procesar(struct ajustes *m, ui_event_t *ev, int *fuera)
 {
-    if (GE_ARRASTRE == ev->tipo)
+    if (UI_EVENT_SWIPE == ev->tipo)
     {
-        if (GE_ARRIBA == ev->dir)
+        if (UI_DIR_UP == ev->dir || UI_DIR_DOWN == ev->dir)
         {
-            ir_fondo(m, fuera);
+            /* Volver atras un nivel: en cualquier subpantalla el gesto arriba
+             * (o abajo) retrocede un paso.  En el menu raiz, solo el gesto
+             * desde el borde inferior devuelve al launcher; un gesto normal
+             * arriba/abajo en la raiz no hace nada. */
+            if (P_WIFI == m->pantalla || P_TIMEOUT == m->pantalla)
+            {
+                pantalla_menu(m);
+            }
+            else if (P_CLAVE == m->pantalla)
+            {
+                pantalla_wifi(m);
+            }
+            else if (UI_EDGE_BOTTOM == ev->edge && UI_DIR_UP == ev->dir)
+            {
+                ir_fondo(m, fuera);
+            }
         }
         return;
     }
-    if (GE_BOTON != ev->tipo)
+    if (UI_EVENT_BUTTON != ev->tipo)
     {
         return;
     }
@@ -622,24 +841,38 @@ static void procesar(struct ajustes *m, gev_t *ev, int *fuera)
         }
         else if (ID_TIEMPO == ev->id)
         {
-            poner_estado(m, "Screen timeout: not implemented");
+            pantalla_timeout(m);
         }
         else if (ID_APAGAR == ev->id)
         {
-            /* El PMIC (AXP2101) es de solo lectura a proposito: escribir el
-             * soft-PWROFF/los rails puede tumbar la placa.  No se apaga aqui. */
-            poner_estado(m, "Power off: PMIC is read-only");
+            /* PMIC (AXP2101) intencionadamente solo lectura en este driver:
+             * escribir soft-PWROFF/rails puede tumbar la placa. */
+            poner_estado(m, "Power off: PMIC solo lectura");
         }
+    }
+    else if (P_TIMEOUT == m->pantalla)
+    {
+        if (ID_TMENOS == ev->id)
+        {
+            if (m->screen_min > 1) m->screen_min--;
+            mostrar_timeout(m);
+        }
+        else if (ID_TMAS == ev->id)
+        {
+            if (m->screen_min < 120) m->screen_min++;
+            mostrar_timeout(m);
+        }
+        else if (ID_TGUARDAR == ev->id)
+        {
+            guardar_timeout(m);
+        }
+
     }
     else if (P_WIFI == m->pantalla)
     {
         if (ID_BUSCAR == ev->id)
         {
             escanear(m);
-        }
-        else if (ID_ATRAS_W == ev->id)
-        {
-            pantalla_menu(m);
         }
         else if (ev->id >= ID_RED && ev->id < ID_RED + m->nredes)
         {
@@ -658,10 +891,7 @@ static void procesar(struct ajustes *m, gev_t *ev, int *fuera)
             lv_textarea_set_text(m->campo, "");
             lvgl_unlock();
         }
-        else if (ID_ATRAS_C == ev->id)
-        {
-            pantalla_wifi(m);
-        }
+
     }
 }
 
@@ -704,27 +934,27 @@ static void salir(struct ajustes *m)
     {
         appmgr_unregister(m->slot);
     }
-    gestos_cerrar(m->g);        /* borra el fondo y todos sus hijos */
+    ui_destroy(m->g);        /* borra el fondo y todos sus hijos */
     psram_free(m);
 }
 
 static void ir_fondo(struct ajustes *m, int *fuera)
 {
-    gev_t ev;
+    ui_event_t ev;
     int s;
 
     if (m->slot < 0)
     {
         return;
     }
-    gestos_show(m->g, 0);
+    ui_show(m->g, 0);
     appmgr_set_state(m->slot, APP_BACKGROUND);
     while (!*fuera)
     {
         s = appmgr_get_state(m->slot);
         if (APP_RUNNING == s)
         {
-            gestos_show(m->g, 1);
+            ui_show(m->g, 1);
             return;
         }
         if (APP_CLOSING == s || APP_FREE == s)
@@ -732,7 +962,7 @@ static void ir_fondo(struct ajustes *m, int *fuera)
             *fuera = 1;
             return;
         }
-        while (gestos_leer(m->g, &ev))
+        while (ui_poll(m->g, &ev))
         {
             ;
         }
@@ -743,7 +973,7 @@ static void ir_fondo(struct ajustes *m, int *fuera)
 int main(int argc, char *argv[])
 {
     struct ajustes *m;
-    gev_t ev;
+    ui_event_t ev;
     int fuera = 0;
 #ifdef PRUEBA_AUTO
     unsigned t_auto = millis();
@@ -765,7 +995,7 @@ int main(int argc, char *argv[])
     m->slot = SYSERR;
 
     /* Solo fondo, anillo de gestos y botones: la app pinta su cabecera. */
-    m->g = gestos_nueva_partes(0);
+    m->g = ui_create_ex(UI_CHROME_NONE);
     if (NULL == m->g)
     {
         psram_free(m);
@@ -779,7 +1009,7 @@ int main(int argc, char *argv[])
 
     while (!fuera)
     {
-        while (gestos_leer(m->g, &ev))
+        while (ui_poll(m->g, &ev))
         {
             procesar(m, &ev, &fuera);
             if (fuera)

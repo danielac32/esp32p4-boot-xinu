@@ -1,0 +1,3 @@
+name=Tetris
+exec=/apps/tetris/app.elf
+color=0x8E44AD

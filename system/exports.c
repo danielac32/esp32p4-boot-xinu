@@ -67,6 +67,7 @@
 #include <appmgr.h>                 /* registro launcher <-> apps                 */
 #include <fslock.h>                 /* candado FAT/microSD                        */
 #include <exports.h>
+#include <taskmon.h>              /* taskmon_get: la tabla de tareas hecha ELF  */
 #include <wifinet.h>                /* WiFi para las apps: escanear y asociar     */
 
 #include "lvgl/lvgl.h"              /* la libreria: 'lvgl.h' a secas es el device,
@@ -434,6 +435,8 @@ static const struct export exports[] = {
     { "lv_canvas_set_px_color", (void *)lv_canvas_set_px_color },
     { "lv_canvas_set_px_opa", (void *)lv_canvas_set_px_opa },
     { "lv_canvas_transform", (void *)lv_canvas_transform },
+    { "lv_draw_rect_dsc_init", (void *)lv_draw_rect_dsc_init },
+    { "lv_draw_arc_dsc_init", (void *)lv_draw_arc_dsc_init },
     { "lv_chart_add_cursor", (void *)lv_chart_add_cursor },
     { "lv_chart_add_series", (void *)lv_chart_add_series },
     { "lv_chart_create", (void *)lv_chart_create },
@@ -581,6 +584,14 @@ static const struct export exports[] = {
     { "lv_font_get_glyph_dsc_fmt_txt", (void *)lv_font_get_glyph_dsc_fmt_txt },
     { "lv_font_get_glyph_width", (void *)lv_font_get_glyph_width },
     { "lv_font_load", (void *)lv_font_load },
+    /* Fuentes en flash (LV_FONT_UNSCII_8/16 = 1): un app puede ponerlas con
+     * lv_obj_set_style_text_font(..., &lv_font_unscii_8, 0).  Comprobadas con
+     * 'nm compile/xinu.elf': ambas existen (R). */
+    { "lv_font_unscii_8", (void *)&lv_font_unscii_8 },
+    { "lv_font_unscii_16", (void *)&lv_font_unscii_16 },
+    /* Monitor de tareas: una llamada por refresco rellena la lista
+     * (include/taskmon.h).  Comprobado con nm: la funcion existe. */
+    { "taskmon_get", (void *)taskmon_get },
     { "lv_fs_close", (void *)lv_fs_close },
     { "lv_fs_dir_close", (void *)lv_fs_dir_close },
     { "lv_fs_dir_open", (void *)lv_fs_dir_open },

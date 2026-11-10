@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 — Cómo se hacen los programas ELF (apps) y LVGL — Xinu-P4.2</title>
+<style>
+:root{
+  --paper:#f6efe3; --paper2:#efe4d1; --ink:#2b2116; --muted:#6b5a46;
+  --brass:#b08d57; --copper:#9a6a3a; --amber:#d9a441; --teal:#2f7d6d;
+  --red:#a94442; --green:#4f7d3a; --card:#fffaf0; --border:#d2c2a6;
+  --mono:"DejaVu Sans Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,var(--paper),var(--paper2));color:var(--ink);
+  font:15px/1.6 Georgia,"Times New Roman",serif}
+a{color:var(--copper)} a:hover{color:var(--teal)}
+.bar{background:linear-gradient(135deg,#3b2a18,#6b4a2a 55%,#8a6238);color:#f8efe0;
+  padding:16px 20px;border-bottom:4px solid var(--brass);box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.bar h1{margin:0;font:700 22px/1.2 Georgia,serif;letter-spacing:.2px}
+.bar p{margin:4px 0 0;color:#e8d7b8;font:13px/1.4 system-ui,sans-serif}
+main{max-width:1040px;margin:0 auto;padding:18px}
+nav.top{margin:0 0 14px;font:13px system-ui,sans-serif}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;
+  padding:14px 16px;margin:0 0 14px;box-shadow:0 1px 3px rgba(43,33,22,.08)}
+h2{margin:0 0 8px;font:700 19px Georgia,serif;color:#3b2a18;border-bottom:1px solid var(--border);padding-bottom:4px}
+h3{margin:14px 0 6px;font:700 15.5px Georgia,serif;color:#4a351f}
+code,pre{font-family:var(--mono);font-size:.92em}
+pre{background:#2b2116;color:#f3e7c9;padding:12px;border-radius:8px;overflow:auto;border:1px solid #5a4630}
+code{background:#efe4d1;padding:1px 4px;border-radius:4px;border:1px solid var(--border)}
+pre code{background:none;border:0;padding:0}
+.note{border-left:4px solid var(--teal);background:#e7f1ec;padding:10px 12px;border-radius:0 8px 8px 0;margin:10px 0}
+.warn{border-left-color:var(--amber);background:#fbf2dd}
+.danger{border-left-color:var(--red);background:#f7e6e5}
+table{width:100%;border-collapse:collapse;font:13.5px/1.45 system-ui,sans-serif;margin:8px 0}
+th,td{border:1px solid var(--border);padding:6px 8px;vertical-align:top}
+th{background:#eadbc2;color:#3b2a18;text-align:left}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.tag{display:inline-block;font:700 11px system-ui,sans-serif;padding:2px 7px;border-radius:4px;margin-right:4px}
+.t{background:#dceee8;color:#1f5c4f}.t2{background:#f3e3c2;color:#7a5322}.t3{background:#e6ddcf;color:#5a4630}
+ul{margin:6px 0 6px 20px}
+</style>
+</head>
+<body>
+<header class="bar">
+  <h1>11 — Cómo se hacen los programas ELF, cómo funcionan y cómo usar LVGL</h1>
+  <p>Apps en <code>/apps</code>, librerías compartidas <code>ui_*</code>/<code>statusbar_*</code>, <code>appmgr</code>, gestos (incl. borde inferior→arriba) y ciclo de vida. Basado en <code>examples/p4-elfsdk/</code> y <code>system/{elfload,appmgr,exports}.c</code>.</p>
+</header>
+<main>
+<nav class="top"><a href="index.html">← Índice</a> · <a href="08-elf.html">08 ELF/exports</a> · <a href="09-ejemplos-launcher.html">09 launcher</a> · <a href="10-lvgl.html">10 LVGL</a></nav>
+
+<div class="card">
+  <h2>1. Qué es un “programa ELF” aquí (y qué NO es)</h2>
+  <p>Una app es un fichero <b>ELF reubicable <code>ET_REL</code> RV32</b> (no un ejecutable enlazado a dirección fija). El kernel lo carga con <code>elfload</code> (<code>system/elfload.c</code>) a <b>PSRAM</b>, aplica reubicaciones, resuelve símbolos contra la tabla <b><code>system/exports.c</code></b> y salta a <code>_start</code> por la ventana directa. <b>No hay MMU</b>: app y kernel comparten el mismo espacio de direcciones.</p>
+  <ul>
+    <li>Formato aceptado: <code>ET_REL</code> (objetos enlazados con <code>ld -r</code>), RV32. No es un ELF <code>ET_EXEC</code>/<code>ET_DYN</code> de Linux.</li>
+    <li>Colocación: código/datos en PSRAM; ejecución por la vista directa coherente (alias 0x88, según el port) para evitar sorpresas de caché.</li>
+    <li>Resolución: toda llamada a kernel/libc/drivers/LVGL pasa por símbolos <b>exportados</b> en <code>exports.c</code>. Si un símbolo no está exportado, la carga falla.</li>
+    <li><code>exit()</code> en una app termina como <code>elf_exit()</code> → <code>kill(gettid())</code> (mata la hebra llamante) y libera la imagen ELF en PSRAM. <b>Nunca</b> llames <code>exit()</code> desde un callback LVGL (matarías <code>lvglui</code>).</li>
+  </ul>
+  <div class="note"><b>Regla crítica del cargador:</b> no uses <b>estáticas/ globales escribibles</b> de fichero. El compilador accede a una estática local con ancla + <code>R_RISCV_LO12_S</code>, y este cargador no aplica esa reloc. <b>Todo el estado mutable va en un handle de <code>psram_malloc()</code></b> (patrón que usan <code>ui_*</code>, <code>statusbar_*</code> y las apps). Las tablas <code>const</code> (solo lectura) sí van bien (.rodata).</div>
+</div>
+
+<div class="card">
+  <h2>2. Estructura en la SD y cómo se empaqueta una app</h2>
+  <p>Cada app vive en su carpeta: <code>/apps/&lt;dir&gt;/</code> con <code>app.elf</code>, metadatos <code>app.txt</code> y, opcionalmente, iconos/assets.</p>
+<pre>/apps/
+  launcher/app.elf          (el lanzador; no se lista como app gestionada)
+  musica/app.elf
+  musica/app.txt
+  musica/icon.jpg           (fallback)
+  musica/icon565.bin        (preferido, rápido)
+  settings/app.elf  ...</pre>
+  <p><b><code>app.txt</code></b> (clave=valor, una por línea): <code>name=</code>, <code>exec=</code> (por defecto <code>/apps/&lt;dir&gt;/app.elf</code>), <code>icon=</code> (ruta LVGL, p. ej. <code>S:/apps/musica/icon.jpg</code>), <code>color=</code> (0xRRGGBB). El launcher lo parsea con <code>fl_fopen/fl_fread</code>.</p>
+  <h3>Iconos rápidos (camino para apps nuevas: snake, etc.)</h3>
+  <p>El launcher prefiere <code>/apps/&lt;dir&gt;/icon565.bin</code> (RGB565 crudo LE, <b>96×96</b>, 18432 bytes, sin cabecera) y lo cachea en PSRAM como <code>lv_img_dsc_t</code> (<code>LV_IMG_CF_TRUE_COLOR</code>) — evita el decode SJPG síncrono desde SD (que congelaba UI/WiFi). Si no existe, usa <code>icon=</code> (SJPG/JPG) por LVGL.</p>
+<pre># Generar icon565.bin (requiere ImageMagick)
+python3 examples/p4-elfsdk/tools/mkicon565.py mi_logo.png \
+        /ruta/a/apps/snake/icon565.bin
+# Subir (httpd; FAT sin truncate: borrar antes)
+curl -X DELETE 'http://&lt;IP&gt;/api/file?path=/apps/snake/icon565.bin'
+curl -X PUT -T icon565.bin 'http://&lt;IP&gt;/api/file?path=/apps/snake/icon565.bin'</pre>
+  <h3>Compilación (patrón real de <code>examples/p4-elfsdk/apps/*/Makefile</code>)</h3>
+<pre>CC=riscv32-unknown-elf-gcc  LD=riscv32-unknown-elf-ld
+CFLAGS = -Os -fno-builtin -fno-pic -ffunction-sections -std=gnu11 \
+  -march=rv32imaf_zicsr_zifencei -mabi=ilp32f -mno-relax -msmall-data-limit=0 -Wall \
+  -I$(TOPDIR) -I$(TOPDIR)/include -I$(TOPDIR)/lvgl -I$(TOPDIR)/fatfs \
+  -I$(TOPDIR)/system/platforms/esp32p4 -I../lib
+
+OBJS = app.o ../lib/ui.o ../lib/statusbar.o ../lib/start.o   # (gestos/estado = compat)
+app.elf: $(OBJS)
+	$(LD) -r -o $@ $(OBJS)     # ELF reubicable ET_REL</pre>
+  <div class="warn"><b>Si cambias la librería compartida</b> (<code>gestos/estado/ui/statusbar</code>) hay que <b>recompilar y subir todas las apps</b>, porque la lib se enlaza dentro de cada ELF (<code>ld -r</code>).</div>
+</div>
+
+<div class="card">
+  <h2>3. Librerías compartidas de app (en <code>apps/lib/</code>)</h2>
+  <table>
+    <tr><th>Módulo</th><th>API (nueva)</th><th>Compat</th><th>Qué hace</th></tr>
+    <tr><td>Entrada/gestos</td><td><code>ui_*</code> (<code>ui_input_t</code>, <code>ui_event_t</code>)</td><td><code>gestos_*</code>, <code>GE_*</code>, <code>gev_t</code></td><td>Fondo pantalla completa que mide el vector del dedo, <b>anillo</b> SPSC (produce <code>lvglui</code>, consume la app con <code>ui_poll</code>), botones (<code>ui_button/_on</code>, swipe funciona encima del botón; un arrastre ≥ umbral no dispara click), y chrome opcional (pill/flecha/nota) vía <code>ui_create_ex</code>. Detecta <b>borde de inicio</b> del swipe (<code>ev.edge</code>: <code>UI_EDGE_BOTTOM/TOP/LEFT/RIGHT</code>).</td></tr>
+    <tr><td>Banda de estado</td><td><code>statusbar_*</code></td><td><code>estado_*</code></td><td>IP, WiFi (rallitas, RSSI por <code>wifiSignalRead/Quality</code> gateado por <code>millis</code> porque el RPC al C6 puede bloquear ~1 s), batería (<code>/dev/power0 POWER_CTRL_PERCENT</code>), enlace (<code>espethLinkIsUp</code>). Geometría LVGL (sin símbolos de fuente). Se refresca barato con <code>statusbar_refresh()</code>.</td></tr>
+    <tr><td>Arranque</td><td colspan="2"><code>start.S</code>/<code>start.o</code></td><td>Punto de entrada del ELF que invoca <code>main</code> según el ABI usado.</td></tr>
+  </table>
+<pre>ui_input_t *ui = ui_create_ex(UI_CHROME_NONE);      /* entrada pura, sin adornos */
+statusbar_t *sb = statusbar_create(ui_root(ui), 8, 8, 304);
+ui_button(ui, 1, "OK", 20, 400, 130, 55, 0x2ECC71);
+for (;;) {
+    statusbar_refresh(sb);
+    ui_event_t ev;
+    if (!ui_poll(ui, &amp;ev)) { sleep(50); continue; }
+    if (ev.type == UI_EVENT_SWIPE &amp;&amp; ev.dir == UI_DIR_UP
+        &amp;&amp; ev.edge == UI_EDGE_BOTTOM) { /* gesto de sistema: salir */ }
+    if (ev.type == UI_EVENT_BUTTON &amp;&amp; ev.id == 1) { /* ... */ }
+}
+statusbar_destroy(sb);   /* ANTES de ui_destroy(): es hijo del root */
+ui_destroy(ui);</pre>
+</div>
+
+<div class="card">
+  <h2>4. Cómo funciona LVGL en este port (modelo mental correcto)</h2>
+  <ul>
+    <li><b>Hilo residente <code>lvglui</code></b> (kernel) bombea LVGL periódicamente. <b>La app NO llama <code>lv_timer_handler()</code></b>. Los callbacks de objetos LVGL corren en <code>lvglui</code>.</li>
+    <li><b><code>lvgl_lock()</code> NO es recursivo</b> (semáforo/mutex). Tómalo para tocar objetos LVGL desde la hebra de la app; <b>nunca</b> llames funciones que lo toman desde un callback LVGL, y nunca desde dentro con el lock ya cogido.</li>
+    <li><b>Patrón seguro (el que usa <code>ui_*</code>):</b> callback → solo <em>apila</em> un evento; la hebra de la app hace <code>ui_poll()</code> y actúa (crea/borra widgets, imprime). Así evitas tocar LVGL profundo desde callback y tu <code>printf</code> va a la sesión correcta.</li>
+    <li><b>Fuente por defecto</b> <code>lv_font_unscii_16</code> (rango básico, sin <code>LV_SYMBOL_*</code> ni Montserrat garantizados a la app): para iconos usa geometría LVGL o imágenes (<code>lv_img</code>).</li>
+    <li><b>Color 16 bpp</b> RGB565 (<code>LV_COLOR_DEPTH 16</code>, <code>LV_COLOR_16_SWAP 0</code>), little-endian. El flush al panel va por SPI2 al ST7796; hoy <b>PIO</b> (DMA del LCD retirado por inestabilidad) — ver §7.</li>
+    <li><b>Imágenes:</b> <code>lv_img_set_src(img, "S:/ruta/...")</code> (lee por el FS de LVGL/FAT) o <code>lv_img_set_src(img, &amp;dsc)</code> con un <code>lv_img_dsc_t</code> cuyo <code>data</code> apunta a píxeles RGB565 (p. ej. en PSRAM) — rápido, sin decodificador.</li>
+  </ul>
+  <div class="danger"><b>Salida:</b> <code>exit()</code> = matar tu hebra. Libera primero UI propia (y destruye la statusbar antes de <code>ui_destroy()</code> porque es hija del root). Nunca desde callback.</div>
+</div>
+
+<div class="card">
+  <h2>5. Cooperación entre apps: <code>appmgr</code> y el launcher</h2>
+  <p><code>system/appmgr.c</code> + <code>include/appmgr.h</code>: tabla fija (<code>APPMGR_MAX</code>) de ranuras, acceso cooperativo, compartida (sin MMU). Estados:</p>
+  <table>
+    <tr><th>Estado</th><th>Significado</th></tr>
+    <tr><td><code>APP_RUNNING</code></td><td>En primer plano: la única que pinta/atiende gestos.</td></tr>
+    <tr><td><code>APP_BACKGROUND</code></td><td>Oculta (<code>ui_show(ui,0)</code>) pero viva; puede seguir (p. ej. música suena por kernel/audio).</td></tr>
+    <tr><td><code>APP_CLOSING</code></td><td>Cierre <b>cooperativo</b>: el launcher lo pide y la app limpia y sale.</td></tr>
+    <tr><td><code>APP_FREE</code></td><td>Ranura libre.</td></tr>
+  </table>
+  <ul>
+    <li><code>appmgr_register(name,path,color,tid)</code> / <code>unregister</code>; <code>appmgr_take_foreground(slot)</code> pone RUNNING y pasa otras RUNNING→BACKGROUND; <code>appmgr_request_close</code> marca CLOSING.</li>
+    <li><b>Gesto de sistema (convención):</b> swipe <b>desde el borde inferior hacia arriba</b> (<code>UI_EVENT_SWIPE</code>, <code>dir==UI_DIR_UP</code>, <code>edge==UI_EDGE_BOTTOM</code>) → la app se oculta y pasa a BACKGROUND; en el launcher, en el switcher, ese gesto vuelve al home. <b>No hay <code>kill()</code> directo</b> desde el launcher: sería destructivo (no borra LVGL ni para audio).</li>
+    <li>El launcher (<code>/apps/launcher</code>) escanea <code>/apps/*/app.txt</code>, muestra iconos (prefiere <code>icon565.bin</code> cacheado en PSRAM), lanza con <code>create+elf_run</code>, y ofrece switcher (resume/close cooperativo). Lee <code>/screen.txt</code> (minutos) para <code>LVGL_CTRL_IDLE</code>.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>6. Archivos de configuración usados</h2>
+  <ul>
+    <li><code>/wifi.txt</code> — credenciales WiFi (lo edita/usa <code>settings</code>; lo consume el arranque de red). <b>Distinto</b> de screen.</li>
+    <li><code>/screen.txt</code> — tiempo de pantalla en <b>minutos</b> (entero texto). Lo edita <code>settings</code>; lo lee el <code>launcher</code> al arrancar.</li>
+    <li>Al sobrescribir en FAT: <b><code>fl_remove()</code> antes de escribir</b> (no hay truncate-on-overwrite). <code>fl_rename</code> no existe.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>7. Rendimiento (LCD/LVGL) y evaluación DMA</h2>
+  <p>El cuello de botella visual es el envío al ST7796 por SPI2 en <b>PIO</b> (ráfagas) + el coste de preparar píxeles. El DMA del LCD (AXI-DMA→SPI2) se probó y se retiró por <b>inestabilidad</b> (no estabilizado). Evaluación honesta de vías:</p>
+  <table>
+    <tr><th>Vía</th><th>Efecto</th><th>Estado / riesgo</th></tr>
+    <tr><td>Subir reloj SPI / optimizar ráfagas PIO</td><td>Mejora lineal en flush</td><td>Bajo riesgo; acotado por panel/cable.</td></tr>
+    <tr><td>DMA AXI→SPI2 (flush)</td><td>Libera CPU durante transferencias grandes</td><td><b>Requiere re-trabajo</b>: descriptores/alineación en PSRAM (ventana caché 0x48 vs directa 0x88), <code>fence</code>/coherencia, tamaño/encadenado, y el fallo previo que colgaba/rompía. Retomar con caso mínimo y trazas, no “a ciegas”.</td></tr>
+    <tr><td>Acel. 2D (PPA, si se expone)</td><td>Blits/conversiones</td><td>Depende de exponer PPA; trabajo de port.</td></tr>
+    <tr><td><b>Lado imagen (lo más efectivo hoy)</b></td><td>Evita decode/escala en runtime</td><td>Preconvertir a RGB565 (<code>icon565.bin</code>/assets .bin), cachear en PSRAM, decodificar/leer <b>chunked + ceder CPU</b> (<code>sleep/resched</code>), escalar a tamaño de pantalla antes de mostrar. Es lo que ya arregla el launcher.</td></tr>
+  </table>
+  <div class="note">Para un <b>visor de fotos</b> “rápido”: no decodifiques un JPEG grande entero en el hilo de UI; usa assets pre-escalados/RGB565 (o decode por tiras a un buffer del tamaño de pantalla) y empuja por franjas. DMA de LCD ayuda al flush, pero sin arreglar el pipeline de imagen seguirá siendo lento.</div>
+</div>
+
+<div class="card">
+  <h2>8. Receta mínima para una app nueva (p. ej. <code>snake</code>)</h2>
+  <ol>
+    <li>Crea <code>examples/p4-elfsdk/apps/snake/{snake.c,Makefile}</code> (copia el patrón: <code>OBJS = snake.o ../lib/gestos.o ../lib/start.o</code>, enlaza con <code>ld -r</code>, banderas RV32IMAF ilp32f).</li>
+    <li>En <code>snake.c</code>: <code>psram_malloc</code> del estado, <code>ui_create_ex(UI_CHROME_NONE)</code>, <code>statusbar_create</code> si quieres, <code>appmgr_register("Snake","/apps/snake/app.elf",color,gettid())</code>, bucle <code>ui_poll</code>+<code>sleep</code>, gesto borde-inferior→arriba = <code>ui_show(ui,0)</code> + <code>appmgr_set_state(slot, APP_BACKGROUND)</code> y espera cooperativa (ver <code>settings</code> <code>ir_fondo</code>); al <code>APP_CLOSING</code> limpia (<code>statusbar_destroy</code> antes de <code>ui_destroy</code>) y <code>exit(0)</code> desde el bucle.</li>
+    <li><code>app.txt</code>: <code>name=Snake</code>, <code>exec=/apps/snake/app.elf</code>, <code>color=0x4f7d3a</code>, <code>icon=S:/apps/snake/icon.jpg</code>.</li>
+    <li>Icono rápido: <code>python3 tools/mkicon565.py snake.png apps/snake/icon565.bin</code>.</li>
+    <li><code>PATH=/opt/riscv32/bin:$PATH make</code> → sube <code>/apps/snake/app.elf</code> (+ icon565) con <code>DELETE</code>+<code>PUT -T</code>.</li>
+  </ol>
+</div>
+
+
+<div class="card">
+  <h2>9. Apps nuevas de ejemplo: cómo se hicieron</h2>
+  <h3>9.1 <code>snake</code> — jugabilidad (dibujo incremental) y controles</h3>
+  <ul>
+    <li><b>Estado en PSRAM</b> (<code>struct state</code>): cuerpo, dirección, comida, puntuación, slot <code>appmgr</code>, puntero <code>ui_input_t</code>, referencias a celdas LVGL. Sin estáticas mutables.</li>
+    <li><b>Rendimiento:</b> redibujar 192 celdas por paso bajo <code>lvgl_lock</code> ahogaba a <code>lvglui</code>. Se pasó a <b>incremental</b>: por tick solo se tocan 2–4 celdas (cabeza nueva, cabeza vieja→cuerpo, borrar cola o pintar comida); el grid completo solo en <code>reset</code>. Lock breve, <code>sleep(40)</code> cede CPU.</li>
+    <li><b>Controles:</b> D-pad con <code>ui_button</code> (ids) + swipes de dirección (<code>UI_EVENT_SWIPE</code>). Tap reinicia. Evita invertir dirección en 180°.</li>
+    <li><b>Cooperación:</b> <code>appmgr_register</code>; <code>UI_EDGE_BOTTOM</code>+<code>UI_DIR_UP</code> → <code>ui_show(ui,0)</code>, <code>appmgr_set_state(APP_BACKGROUND)</code>, bucle de espera (sale a <code>APP_RUNNING</code> mostrando UI, o a <code>APP_CLOSING/FREE</code> limpiando y <code>exit(0)</code> desde el bucle principal — nunca desde callback).</li>
+  </ul>
+
+  <h3>9.2 <code>photos</code> — galería (grid + grande) y pipeline de imagen</h3>
+  <p>Arquitectura en dos modos con un solo bucle de eventos:</p>
+  <ul>
+    <li><b>GRID (rejilla 3×3, paginada):</b> celdas = <code>ui_button(ui, ID_CELL+i, nombre, ...)</code> (el swipe funciona sobre botones). Se carga la miniatura de la celda y, si hay <code>.565</code>, se crea un <code>lv_img</code> hijo con <code>lv_img_dsc_t</code> apuntando al buffer de esa ranura. Toque → <code>MODE_FULL</code> en ese índice. Izq/der cambia página.</li>
+    <li><b>FULL (grande):</b> un <code>lv_img</code> reutilizado (hijo de <code>ui_root</code>, no de botones, así <code>ui_buttons_clear</code> no lo borra), centrado. Izq/der = prev/next; <b>arriba o abajo</b> = volver a rejilla. Desde rejilla, <b>borde inferior↑</b> = fondo.</li>
+    <li><b>Fuente única y resolución de assets:</b> escanea <code>/img</code>. Por nombre base <code>pNN</code> resuelve: miniatura <code>/img565/thumb/pNN.565</code> (96×72, 13824 B) y grande <code>/img565/pNN.565</code> (320×240, 153600 B); si faltan, hermano <code>.565</code> o, en último caso, JPG por FS LVGL (<code>S:/...</code>, lento). Buffers fijos en PSRAM: <code>TH_SZ*9 + FU_SZ</code>.</li>
+    <li><b>I/O y LVGL:</b> <code>read_all</code>/<code>fl_fopen</code>/<code>resolve_src</code> hacen FAT <b>fuera</b> de <code>lvgl_lock</code>; solo se toma el lock para crear/actualizar objetos y <code>lv_img_set_src</code>. Lectura chunked (<code>fl_fread</code> 4096 B). Formato <code>LV_IMG_CF_TRUE_COLOR</code>, RGB565 LE (<code>LV_COLOR_16_SWAP 0</code>).</li>
+    <li><b>Pipeline en host:</b> <code>examples/p4-elfsdk/tools/mkphoto565.py</code> convierte <code>sd/img/*.jpg</code> → <code>sd/img565/pNN.565</code> + <code>sd/img565/thumb/pNN.565</code> (ImageMagick <code>convert</code>, resize+extent, pack <code>&lt;H</code>). Copiar <code>sd/img565/</code> a la SD real para fluidez.</li>
+  </ul>
+  <div class="warn"><b>Por qué no JPEG en runtime:</b> el cuello es decode CPU + lectura SD + flush PIO (DMA LCD retirado). El DMA de flush no arregla el decode; el salto real es preconvertir/escalar a RGB565 y mostrar con <code>lv_img_dsc_t</code>.</div>
+
+  <h3>9.3 <code>settings</code> — WiFi, config y navegación</h3>
+  <ul>
+    <li><b>WiFi:</b> <code>wifinet</code> (<code>wifiAsegurar/wifiScanFill/wifiRedConectar</code>). Lista redes; teclado LVGL para clave (callbacks solo marcan <code>accion</code>; el bucle <code>main</code> conecta). Persiste en <code>/wifi.txt</code> leyendo/mezclando y reescribiendo (<b><code>fl_remove</code> antes</b>, sin truncate; sin <code>fl_rename</code>). Muestra SSID guardado + IP (<code>netLookup("ETH0")</code>/<code>netaddrsprintf</code>).</li>
+    <li><b>Tiempo de pantalla:</b> edita minutos (−/+), muestra el número grande en vivo, guarda/lee <code>/screen.txt</code> (entero texto, distinto de <code>/wifi.txt</code>). El launcher lo aplica a <code>LVGL_CTRL_IDLE</code>.</li>
+    <li><b>Gestos/navegación:</b> en subpantallas swipe ↑/↓ = atrás; <b>borde inferior↑</b> = fondo/launcher. Sin botones “Atrás” redundantes.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>10. Cómo funciona la API nueva (resumen práctico)</h2>
+  <table>
+    <tr><th>Necesidad</th><th>API / patrón</th></tr>
+    <tr><td>Entrada y gestos</td><td><code>ui_create_ex(UI_CHROME_NONE)</code> → bucle <code>ui_poll(&amp;ev)</code>. Tipos <code>UI_EVENT_SWIPE/BUTTON/TAP</code>. Swipe con <code>dir</code> + <code>edge</code> (borde de inicio). Botones <code>ui_button(ui,id,label,x,y,w,h,color)</code> (ids en el evento; swipe funciona sobre el botón).</td></tr>
+    <tr><td>Barra de estado</td><td><code>statusbar_create(root,x,y,w)</code> + <code>statusbar_refresh()</code> en el bucle. Destruir con <code>statusbar_destroy</code> <b>antes</b> de <code>ui_destroy</code> (es hija del root).</td></tr>
+    <tr><td>Pintar con LVGL</td><td><code>lvglui</code> bombea; la app no llama <code>lv_timer_handler()</code>. Tomar <code>lvgl_lock()</code> (no recursivo) alrededor de crear/modificar objetos desde la hebra de la app. Callbacks LVGL: <b>solo encolar</b>.</td></tr>
+    <tr><td>Imágenes rápidas</td><td>RGB565 LE <code>.565</code> → buffer PSRAM → <code>lv_img_dsc_t</code> (<code>LV_IMG_CF_TRUE_COLOR</code>) → <code>lv_img_set_src(img,&amp;dsc)</code>. I/O FAT fuera del lock. Fallback lento: <code>lv_img_set_src(img,"S:/ruta.jpg")</code>.</td></tr>
+    <tr><td>Ciclo cooperativo</td><td><code>appmgr_register</code>/<code>unregister</code>. Fondo: <code>ui_show(0)</code>+<code>APP_BACKGROUND</code> y esperar; <code>APP_RUNNING</code> restaura; <code>APP_CLOSING</code> limpia y <code>exit(0)</code> desde el bucle. Gesto sistema: borde inferior↑.</td></tr>
+    <tr><td>FAT/config</td><td><code>/screen.txt</code> (min) ≠ <code>/wifi.txt</code>. Sobrescribir: <code>fl_remove</code> + <code>fl_fopen("w")</code>+<code>fl_fwrite</code>. Sin <code>fl_rename</code>.</td></tr>
+  </table>
+  <div class="note"><b>Estilo recomendado:</b> una sentencia por línea, funciones claras, sin estáticas mutables en el ELF (todo el estado en un handle <code>psram_malloc</code>). Es más legible y evita bugs del cargador (<code>R_RISCV_LO12_S</code> en anclas locales).</div>
+</div>
+
+<nav class="top"><a href="index.html">← Índice</a></nav>
+</main>
+</body>
+</html>

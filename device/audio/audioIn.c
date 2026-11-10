@@ -33,6 +33,7 @@
 #include "i2s.h"
 #include "ahbdma.h"
 #include "device.h"
+#include <stdio.h>
 
 /* Descriptor del motor: las mismas tres palabras de dma_descriptor_t del SDK.
  * El dw0 lo reescribe el motor al cerrar el trozo: anota los bytes recibidos y
@@ -91,6 +92,7 @@ static uint32_t dataBus;
 static uint32_t drainIdx;             /* descriptor que se esta entregando     */
 static uint32_t drainOff;             /* dentro de ese descriptor              */
 static uint32_t eofIdx;               /* ultimo visto en in_suc_eof_des_addr   */
+static uint32_t eofStale;            /* posicion que dejo la sesion anterior  */
 static bool eofSeen;
 static uint64_t produced;             /* trozos cerrados por el motor          */
 static uint64_t consumed;             /* trozos entregados al consumidor       */
@@ -133,10 +135,28 @@ static bool in_produce(void)
     }
     if (!eofSeen)
     {
+        /* Primer avistamiento desde que se monto el anillo.  El motor empieza
+         * siempre por el descriptor 0:
+         *  - si el registro sigue en la posicion que dejo la sesion anterior,
+         *    no ha cerrado nada todavia; la referencia tiene que ser 31 para
+         *    que el primer cambio al 0 cuente UN trozo (con la posicion vieja
+         *    como referencia, un 24 -> 0 contaba 8 y el lector se iba por
+         *    delante del motor: copiaba el trozo que se estaba llenando y la
+         *    toma entera salia a cero).
+         *  - si ya cambio, ha cerrado 0..idx y hay idx+1 trozos buenos. */
         eofSeen = true;
-        eofIdx = idx;
-        produced = 1U;
-        return true;
+        printf("audiodbg: primer eof stale=%u idx=%u\r\n", eofStale, idx);
+        if (idx == eofStale)
+        {
+            eofIdx = IN_DESC_COUNT - 1U;
+            produced = 0U;
+        }
+        else
+        {
+            eofIdx = idx;
+            produced = (uint32_t)(idx + 1U);
+        }
+        return produced > consumed;
     }
     if (idx == eofIdx)
     {
@@ -204,6 +224,18 @@ bool audio_in_start(void)
      * escribe no puede salir como basura. */
     psram_zero(data, IN_DESC_COUNT * IN_CHUNK_BYTES);
 
+    /* DIAGNOSTICO TEMPORAL: centinela en los 16 primeros bytes de cada trozo;
+     * si al parar siguen ahi es que el motor no ha pasado por ese trozo. */
+    for (i = 0U; i < IN_DESC_COUNT; i++)
+    {
+        uint32_t j;
+
+        for (j = 0U; j < 16U; j++)
+        {
+            data[i * IN_CHUNK_BYTES + j] = 0xDEU;
+        }
+    }
+
     for (i = 0U; i < IN_DESC_COUNT; i++)
     {
         desc[i].buffer = dataBus + i * IN_CHUNK_BYTES;
@@ -229,6 +261,11 @@ bool audio_in_start(void)
         (void)i2s_rx_stop();
         return false;
     }
+    /* Posicion de fin de recepcion que dejo la sesion anterior.  Se apunta
+     * antes de enlazar el motor, que es cuando el registro aun es el viejo:
+     * in_produce() la usa para no contar como propio un trozo que no lo es. */
+    eofStale = in_desc_index(ahbdma_in_eof_desc());
+
     if (!ahbdma_in_link(descBus))
     {
         (void)i2s_rx_stop();
@@ -259,6 +296,32 @@ void audio_in_stop(void)
     if (!running)
     {
         return;
+    }
+
+    {
+        uint32_t m = 0U;
+        uint32_t i, j;
+
+        for (i = 0U; i < IN_DESC_COUNT; i++)
+        {
+            bool sent = true;
+
+            for (j = 0U; j < 16U; j++)
+            {
+                if (data[i * IN_CHUNK_BYTES + j] != 0xDEU)
+                {
+                    sent = false;
+                    break;
+                }
+            }
+            if (!sent)
+            {
+                m |= (1U << i);
+            }
+        }
+        printf("audiodbg: eof=0x%08x idx=%u prod=%u cons=%u drain=%u/%u mask=0x%08x\r\n",
+               ahbdma_in_eof_desc(), in_desc_index(ahbdma_in_eof_desc()),
+               (unsigned)produced, (unsigned)consumed, drainIdx, drainOff, m);
     }
 
     ahbdma_in_stop();

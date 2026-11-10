@@ -1,0 +1,3 @@
+name=Tareas
+exec=/apps/tareas/app.elf
+color=0x2EC0E4
