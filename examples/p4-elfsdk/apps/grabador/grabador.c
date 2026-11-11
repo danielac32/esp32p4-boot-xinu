@@ -13,11 +13,10 @@
  *     o sonando; si esta en reposo, devuelve al launcher.
  *     (Prohibido el boton X; la salida se hace con el gesto.)
  *
- * Por que se grababa solo "a la segunda pulsacion": el ES8311 carga la
- * ganancia del ADC con un fundido que necesita el reloj de audio; la primera
- * toma tras montar la captura se comia el arranque del fundido: entraba
- * silencio y la toma se descartaba.  Ahora, al arrancar el micro, se descarta
- * el transitorio (~300 ms) antes de cronometrar.
+ * La captura arranca en cuanto se pulsa GRABAR y guarda desde el primer
+ * momento, como rec.c y p4demoTask: no se descarta un tramo inicial para no
+ * perder el comienzo de la voz.  El ADC del ES8311 puede tardar unos ms en
+ * asentar su ganancia (fundido), pero comer audio del usuario es peor.
  *
  * Interfaz: panel vintage de cinta de cassette con pantalla de osciloscopio
  * (canvas) y carretes girando mientras hay señal.  Se repinta cada ~70 ms y
@@ -67,7 +66,8 @@ LV_FONT_DECLARE(lv_font_unscii_8);
 #define BYTES_MS    192U
 #define MAX_SEC     20U
 #define CAPACITY    (BYTES_MS * 1000U * MAX_SEC)
-#define VA_DISCARD_MS 300U
+/* (ya no se descarta un tramo inicial: se graba desde el primer instante,
+ * como en rec.c/p4demoTask, para no perder el comienzo de la voz). */
 #define VA_VOLUMEN 75U
 #define VA_TEST_MS 1500U
 
@@ -294,11 +294,13 @@ static void circulo(lv_obj_t *cv, int cx, int cy, int r, int npts,
     dsc.bg_opa = opa;
     dsc.bg_color = lv_color_hex(rgb);
 
-    for (dy = -r; dy <= r; dy++)
+    /* Paso 2: la mitad de rects y se ve igual a este tamaño; reduce el
+     * tiempo bajo lvgl_lock para no congelar la atencion de los botones. */
+    for (dy = -r; dy <= r; dy += 2)
     {
         int dx = (int)sqrtf((float)(r * r - dy * dy));
 
-        lv_canvas_draw_rect(cv, cx - dx, cy + dy, 2 * dx + 1, 1, &dsc);
+        lv_canvas_draw_rect(cv, cx - dx, cy + dy, 2 * dx + 1, 2, &dsc);
     }
 }
 
@@ -431,11 +433,14 @@ static void boton_grabar(struct grabadora *g, const char *txt)
 
 /* Captura, en la hebra "grabcap".  No toca LVGL ni el estado de la app: solo
  * llena g->buf, publica g->len y levanta cap_done al cerrar el micro.  main
- * repinta mirando g->len mientras esto corre. */
+ * repinta mirando g->len mientras esto corre.
+ *
+ * Igual que rec.c y p4demoTask: se empieza a guardar desde el primer momento
+ * (sin tirar un tramo inicial), para no perder el comienzo de la voz.  El
+ * fundido de ganancia del ADC del ES8311 puede dejar mudos los primeros ms,
+ * pero es preferible a comer el arranque de quien habla. */
 static void capturar(struct grabadora *g)
 {
-    uint8_t basura[512];
-    uint32_t t0;
     long r;
 
     r = control(g->audio, AUDIO_CTRL_IN, 1, 0);
@@ -445,19 +450,6 @@ static void capturar(struct grabadora *g)
         g->fallo = 1;
         g->cap_done = 1;
         return;
-    }
-
-    /* El ES8311 carga la ganancia del ADC con un fundido que necesita el reloj
-     * de audio: sin tirar este transitorio la primera toma entraba en silencio
-     * y parecia que solo grababa "a la segunda pulsacion". */
-    t0 = (uint32_t)millis();
-    while ((uint32_t)(millis() - t0) < VA_DISCARD_MS &&
-           !g->quit && !g->cap_stop)
-    {
-        if (read(g->audio, basura, sizeof(basura)) <= 0)
-        {
-            sleep(1);
-        }
     }
 
     while (!g->quit && !g->cap_stop && g->len < g->cap_max)
@@ -624,15 +616,14 @@ static void arrancar_repro(struct grabadora *g)
     tiempo_pintar(g, 0);
 }
 
-/* Corta la reproduccion y deja el mando en reposo al instante.  La hebra
- * todavia tiene que salir del write() en curso (~21 ms de chunk) y desmontar
- * el stream; ST_CORTANDO existe para que ese resto no acepte pulsaciones. */
+/* Corta la reproduccion y espera a que la hebra desmonte el stream (puede
+ * tardar lo que queda del write() en curso, ~21 ms).  Hasta rep_done no se
+ * acepta otra orden, asi que el estado se muestra como transitorio. */
 static void cortar_repro(struct grabadora *g)
 {
     g->rep_stop = 1;
     g->estado = ST_CORTANDO;
-    estado_pintar(g, "LISTO", C_VERDE);
-    boton_grabar(g, "GRABAR");
+    estado_pintar(g, "PARANDO...", C_AMBER);
 }
 
 /* ---- interfaz ------------------------------------------------------------ */
@@ -785,8 +776,7 @@ static void procesar(struct grabadora *g, ui_event_t *ev, int *fuera)
                 g->cap_stop = 1;
                 g->estado = ST_PARANDO;
                 g->autoplay = 0;
-                estado_pintar(g, "LISTO", C_VERDE);
-                boton_grabar(g, "GRABAR");
+                estado_pintar(g, "PARANDO...", C_AMBER);
                 rec_pintar(g, 0);
             }
             else if (ST_REPRODUCIENDO == g->estado)
@@ -825,14 +815,13 @@ static void procesar(struct grabadora *g, ui_event_t *ev, int *fuera)
         }
         else if (ST_GRABANDO == g->estado)
         {
-            /* El mando vuelve a GRABAR aqui mismo, antes de que la hebra haya
-             * cerrado el micro: el dedo no paga lo que tarde el device.  Al
-             * llegar cap_done, main reproduce la toma como antes. */
+            /* Se pide parar y se espera a que la hebra cierre el micro; en
+             * cap_done main reproduce la toma (autoplay).  No se finge LISTO
+             * antes de tiempo: hasta cap_done el boton no acepta otra orden. */
             g->cap_stop = 1;
             g->estado = ST_PARANDO;
             g->autoplay = 1;
-            estado_pintar(g, "LISTO", C_VERDE);
-            boton_grabar(g, "GRABAR");
+            estado_pintar(g, "PARANDO...", C_AMBER);
             rec_pintar(g, 0);
         }
         else if (ST_REPRODUCIENDO == g->estado)
@@ -1103,7 +1092,7 @@ int main(int argc, char *argv[])
         {
             uint32_t ahora = (uint32_t)millis();
 
-            if (ahora - g->t_ui >= 70U)
+            if (ahora - g->t_ui >= 200U)
             {
                 uint32_t fin = (ST_GRABANDO == g->estado) ? g->len : g->pos;
 

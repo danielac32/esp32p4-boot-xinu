@@ -33,7 +33,6 @@
 #include "i2s.h"
 #include "ahbdma.h"
 #include "device.h"
-#include <stdio.h>
 
 /* Descriptor del motor: las mismas tres palabras de dma_descriptor_t del SDK.
  * El dw0 lo reescribe el motor al cerrar el trozo: anota los bytes recibidos y
@@ -145,7 +144,6 @@ static bool in_produce(void)
          *    toma entera salia a cero).
          *  - si ya cambio, ha cerrado 0..idx y hay idx+1 trozos buenos. */
         eofSeen = true;
-        printf("audiodbg: primer eof stale=%u idx=%u\r\n", eofStale, idx);
         if (idx == eofStale)
         {
             eofIdx = IN_DESC_COUNT - 1U;
@@ -224,17 +222,7 @@ bool audio_in_start(void)
      * escribe no puede salir como basura. */
     psram_zero(data, IN_DESC_COUNT * IN_CHUNK_BYTES);
 
-    /* DIAGNOSTICO TEMPORAL: centinela en los 16 primeros bytes de cada trozo;
-     * si al parar siguen ahi es que el motor no ha pasado por ese trozo. */
-    for (i = 0U; i < IN_DESC_COUNT; i++)
-    {
-        uint32_t j;
-
-        for (j = 0U; j < 16U; j++)
-        {
-            data[i * IN_CHUNK_BYTES + j] = 0xDEU;
-        }
-    }
+    psram_zero(data, IN_DESC_COUNT * IN_CHUNK_BYTES);
 
     for (i = 0U; i < IN_DESC_COUNT; i++)
     {
@@ -296,32 +284,6 @@ void audio_in_stop(void)
     if (!running)
     {
         return;
-    }
-
-    {
-        uint32_t m = 0U;
-        uint32_t i, j;
-
-        for (i = 0U; i < IN_DESC_COUNT; i++)
-        {
-            bool sent = true;
-
-            for (j = 0U; j < 16U; j++)
-            {
-                if (data[i * IN_CHUNK_BYTES + j] != 0xDEU)
-                {
-                    sent = false;
-                    break;
-                }
-            }
-            if (!sent)
-            {
-                m |= (1U << i);
-            }
-        }
-        printf("audiodbg: eof=0x%08x idx=%u prod=%u cons=%u drain=%u/%u mask=0x%08x\r\n",
-               ahbdma_in_eof_desc(), in_desc_index(ahbdma_in_eof_desc()),
-               (unsigned)produced, (unsigned)consumed, drainIdx, drainOff, m);
     }
 
     ahbdma_in_stop();
